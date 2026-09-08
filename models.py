@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, func, ForeignKey
 from database import Base
+from sqlalchemy.orm import relationship
 
 class UserDatabase(Base):
     __tablename__ = "users"
@@ -9,6 +10,7 @@ class UserDatabase(Base):
     email = Column(String, nullable=False,unique=True)
     is_active = Column(Boolean, default=True,nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    sessions = relationship("Session", back_populates="user")
 
 class Session(Base):
     __tablename__ = "sessions"
@@ -17,3 +19,4 @@ class Session(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=False)
+    user = relationship("UserDatabase", back_populates="sessions")

@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
 
-from fastapi import FastAPI, Depends, HTTPException, status, Response
+from fastapi import FastAPI, Depends, HTTPException, status, Response, Cookie
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session as DbSession
@@ -180,3 +180,25 @@ def login(
     )
 
     return {"message": "Login successful"}
+
+def get_current_user_session(db: DbSession = Depends(get_db), 
+                            session_id: str | None = Cookie(default=None)):
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session not found",
+        )
+    session_id_hash = hash_session_id(session_id)
+    session = db.query(Session).filter(
+        Session.session_id_hash == session_id_hash
+    ).first()
+    if not session or session.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session",
+        )
+    return session.user
+
+@app.get("/profile")
+def profile(user:UserDatabase = Depends(get_current_user_session)):
+    return {"username": user.username, "email": user.email, "id": user.id}
