@@ -202,3 +202,26 @@ def get_current_user_session(db: DbSession = Depends(get_db),
 @app.get("/profile")
 def profile(user:UserDatabase = Depends(get_current_user_session)):
     return {"username": user.username, "email": user.email, "id": user.id}
+
+@app.post("/logout")
+def logout(
+    response: Response,
+    db: DbSession = Depends(get_db), 
+    session_id: str | None = Cookie(default=None)):
+
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session not found",
+        )
+    session_id_hash = hash_session_id(session_id)
+    session = db.query(Session).filter(
+        Session.session_id_hash == session_id_hash
+    ).first()
+    if not session:
+        response.delete_cookie("session_id")
+        return {"message": "Already logged out"}
+    db.delete(session)
+    db.commit()
+    response.delete_cookie("session_id")
+    return {"message": "Logout successful"}
