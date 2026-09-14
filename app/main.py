@@ -225,3 +225,18 @@ def logout(
     db.commit()
     response.delete_cookie("session_id")
     return {"message": "Logout successful"}
+
+
+# JWT Authentication
+import jwt
+import settings
+
+def create_jwt_token(user: UserDatabase):
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user.id),
+        "iat": now,
+        "exp": now + timedelta(minutes=20)
+    }
+    token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm="HS256")  
+    return token  
