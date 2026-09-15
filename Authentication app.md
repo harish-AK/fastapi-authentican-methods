@@ -741,3 +741,328 @@ JWT_SECRET_KEY="sjngkrg45kw4ntpwoihgnklrni5"
 >Access token       → short-lived → API access
 Refresh token      → longer-lived → obtain new access token
 
+JWT flow
+```
+POST /jwt-login
+      ↓
+find user
+      ↓
+verify Argon2 password
+      ↓
+check active
+      ↓
+create JWT
+      ↓
+return bearer token
+```
+
+>Encoding
+
+```python
+# JWT Authentication
+import jwt
+import settings
+  
+def create_jwt_token(user: UserDatabase):
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user.id),
+        "iat": now,
+        "exp": now + timedelta(minutes=20)
+    }
+    token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm="HS256")
+    # encode the token with JWT secret key and algo HS256  
+    return token
+```
+
+
+>Decoding
+
+```python
+def decode_token(token: str):
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+
+            algorithms=["HS256"],
+            options={"require": ["sub", "iat", "exp"]} # To check the necessary fields in token
+        )
+        return payload  
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+        )
+    except jwt.MissingRequiredClaimError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Token missing required claim: {e}",
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+```
+
+> Validate current user whose details are in the jwt token
+
+	- Similar to HTTPBasic, HTTPBearer used to validate the token
+
+> Get the current user token and validate it
+
+```python
+from fastapi.security import HTTPBearer
+security = HTTPBearer()
+def get_current_user_jwt(token = Depends(security), db: DbSession = Depends(get_db)):
+    token = token.credentials
+    payload = decode_token(token)
+    user_id = payload.get("sub")
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+    try:
+        user_id = int(user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+    user = db.query(UserDatabase).filter(
+        UserDatabase.id == user_id
+    ).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User is not active",
+        )
+    return user
+  
+@app.get("/jwt-profile")
+def jwt_profile(current_user: UserDatabase = Depends(get_current_user_jwt)):
+    return {"username": current_user.username, "email": current_user.email, "id": current_user.id}
+```
+
+```
+username/password
+      ↓
+   JWT login
+      ↓
+ short-lived JWT
+      ↓
+Authorization: Bearer JWT
+      ↓
+verify signature + exp
+      ↓
+extract sub
+      ↓
+find user
+      ↓
+ /jwt-profile
+```
+
+>[!NOTE]
+>If payload changes in the generated token, token will be invalidated 
+
+
+```
+Original token
+    ↓
+valid signature
+    ↓
+✅ accepted
+
+Modify payload
+    ↓
+signature no longer matches
+    ↓
+❌ rejected
+```
+
+---
+
+#### Refresh token
+
+Used to get new access token.
+
+If an user using the app for more than 15 mins and access token expiration is only 15 mins, refresh token will create new access token after every 15 mins untill user logs out. 
+
+```
+                    Login
+                      ↓
+              ┌───────┴───────┐
+              ↓               ↓
+       Access Token      Refresh Token
+        15 minutes          longer
+              ↓               ↓
+       API requests      obtain new
+                         access token
+```
+
+**Access token**
+
+- Used to access protected APIs.
+- Short-lived.
+- Sent frequently.
+
+**Refresh token**
+
+- Used only to obtain a new access token.
+- Longer-lived.
+- Much more sensitive.
+
+> Need to store the refresh token in server side (in a table)
+
+Refresh token model
+```python
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+    id = Column(Integer, primary_key=True)
+    refresh_token_hash = Column(String(64), nullable=False,unique=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked = Column(Boolean, default=False,nullable=False)
+    user = relationship("UserDatabase", back_populates="refresh_tokens")
+```
+
+```
+POST /jwt-login
+       ↓
+  verify credentials
+       ↓
+ ┌─────┴─────────┐
+ ↓               ↓
+Access JWT    Refresh token
+15 min          7 days
+ ↓               ↓
+API access    get new access token
+```
+
+In jwt-login return both refresh and access token.
+```python
+@app.post("/jwt-login")
+def jwt_login(login_data: UserLogin, db: DbSession = Depends(get_db)):
+    token = create_jwt_token(user)
+    refresh_token = create_refresh_token(user, db)
+    return {"access_token": token, "token_type": "bearer", "refresh_token": refresh_token}
+```
+
+```
+Refresh Token A
+      │
+      ▼
+POST /jwt-refresh
+      │
+      ├── validate A
+      ├── revoke A
+      ├── create Refresh Token B
+      └── create Access Token B
+             │
+             ▼
+      return B + Access Token
+```
+
+once a new refresh token created, old one will be revoked and cant be accessed.
+
+> Refresh token implementation
+
+- Validate refresh token
+- revoke current one
+- Create new refresh and access token
+
+```python
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+  
+@app.post("/jwt-refresh")
+def jwt_refresh(request: RefreshTokenRequest, db: DbSession = Depends(get_db)):
+    raw_refresh_token = request.refresh_token
+    refresh_token_hash = hashlib.sha256(raw_refresh_token.encode()).hexdigest()
+    stored_token = db.query(RefreshToken).filter(
+        RefreshToken.refresh_token_hash == refresh_token_hash
+    ).first()
+    if not stored_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+        )
+    if stored_token.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token expired",
+        
+
+    if stored_token.revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token revoked",
+        )
+    user = stored_token.user
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User is not active",
+        )
+  
+    # Revoke old refresh token (Refresh Token Rotation)
+    stored_token.revoked = True
+  
+    new_refresh_token = create_refresh_token(user, db)
+    new_access_token = create_jwt_token(user)
+    return {"access_token": new_access_token, "refresh_token": new_refresh_token}
+```
+
+> Family tree
+
+If refresh token C created by B and B created A and A is reused by attacker which is revoked means all the tokens created via A might also compromised so revoke all the tokens. 
+
+Have a column called family_id which marks the tree of token creation C from B, B from A ...
+```python
+# in RefreshToken model
+family_id = Column(String(64), nullable=False, index=True)
+```
+
+in jwt_refresh endpoint
+```python
+if stored_token.revoked:
+    db.query(RefreshToken).filter(
+        RefreshToken.family_id == stored_token.family_id
+    ).update({"revoked": True})
+    db.commit()
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Revoked refresh token reused. All tokens in this family have been invalidated.",
+    )
+```
+
+
+### JWT — completed
+
+- Access-token creation with `sub`, `iat`, `exp` ✅
+- HS256 signing and verification ✅
+- Required-claim validation ✅
+- Expired/invalid token handling ✅
+- Bearer authentication with `HTTPBearer` ✅
+- Protected endpoints using JWT dependency ✅
+- Opaque refresh tokens ✅
+- Refresh tokens stored as hashes ✅
+- Refresh-token expiry/revocation ✅
+- Access + refresh token login flow ✅
+- Refresh endpoint ✅
+- Refresh-token rotation ✅
+- Refresh-token family tracking ✅
+- Reuse detection + family revocation ✅

@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .security import hash_password, verify_password
 from database import get_db
-from models import UserDatabase, Session
+from models import UserDatabase, Session, RefreshToken
 
 app = FastAPI()
 
@@ -240,3 +240,163 @@ def create_jwt_token(user: UserDatabase):
     }
     token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm="HS256")  
     return token  
+
+
+@app.post("/jwt-login")
+def jwt_login(login_data: UserLogin, db: DbSession = Depends(get_db)):
+    user = db.query(UserDatabase).filter(
+        UserDatabase.username == login_data.username
+    ).first()
+
+    if not user or not verify_password(login_data.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User is not active",
+        )
+
+    token = create_jwt_token(user)
+    refresh_token = create_refresh_token(user, db)
+    return {"access_token": token, "token_type": "bearer", "refresh_token": refresh_token}  
+
+def decode_token(token: str):
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=["HS256"],
+            options={"require": ["sub", "iat", "exp"]}
+        )
+        return payload  
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+        )
+    except jwt.MissingRequiredClaimError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Token missing required claim: {e}",
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+
+from fastapi.security import HTTPBearer
+security = HTTPBearer()
+def get_current_user_jwt(token = Depends(security), db: DbSession = Depends(get_db)):
+    token = token.credentials
+    payload = decode_token(token)
+    user_id = payload.get("sub")
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+    try:
+        user_id = int(user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+    user = db.query(UserDatabase).filter(
+        UserDatabase.id == user_id
+    ).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User is not active",
+        )
+    return user
+
+@app.get("/jwt-profile")
+def jwt_profile(current_user: UserDatabase = Depends(get_current_user_jwt)):
+    return {"username": current_user.username, "email": current_user.email, "id": current_user.id}
+
+
+def create_refresh_token(user: UserDatabase, db: DbSession, family_id: str | None = None):
+    refresh_token = secrets.token_urlsafe(64)
+    refresh_token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    
+    if family_id is None:
+        family_id = secrets.token_urlsafe(32)
+
+    new_refresh_token = RefreshToken(
+        refresh_token_hash=refresh_token_hash,
+        user_id=user.id,
+        expires_at=expires_at,
+        family_id=family_id
+    )
+    try:
+        db.add(new_refresh_token)
+        db.commit()
+        return refresh_token
+    except IntegrityError:
+        db.rollback()
+        raise
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+@app.post("/jwt-refresh")
+def jwt_refresh(request: RefreshTokenRequest, db: DbSession = Depends(get_db)):
+    raw_refresh_token = request.refresh_token
+    refresh_token_hash = hashlib.sha256(raw_refresh_token.encode()).hexdigest()
+    stored_token = db.query(RefreshToken).filter(
+        RefreshToken.refresh_token_hash == refresh_token_hash
+    ).first()
+    if not stored_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+        )
+    if stored_token.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token expired",
+        )
+    if stored_token.revoked:
+        # Reuse detection: Revoke all tokens belonging to this family
+        db.query(RefreshToken).filter(
+            RefreshToken.family_id == stored_token.family_id
+        ).update({"revoked": True})
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Revoked refresh token reused. All tokens in this family have been invalidated.",
+        )
+    user = stored_token.user
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User is not active",
+        )
+
+    # Revoke old refresh token (Refresh Token Rotation)
+    stored_token.revoked = True
+
+    # Rotate token within the same family
+    new_refresh_token = create_refresh_token(user, db, family_id=stored_token.family_id)
+    new_access_token = create_jwt_token(user)
+    return {"access_token": new_access_token, "refresh_token": new_refresh_token}
+    

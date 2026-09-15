@@ -11,6 +11,7 @@ class UserDatabase(Base):
     is_active = Column(Boolean, default=True,nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     sessions = relationship("Session", back_populates="user")
+    refresh_tokens = relationship("RefreshToken", back_populates="user")
 
 class Session(Base):
     __tablename__ = "sessions"
@@ -20,3 +21,15 @@ class Session(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=False)
     user = relationship("UserDatabase", back_populates="sessions")
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+    id = Column(Integer, primary_key=True)
+    refresh_token_hash = Column(String(64), nullable=False,unique=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked = Column(Boolean, default=False,nullable=False)
+    user = relationship("UserDatabase", back_populates="refresh_tokens")
+    family_id = Column(String(64), nullable=False, index=True)
+    
