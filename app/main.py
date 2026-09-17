@@ -400,3 +400,83 @@ def jwt_refresh(request: RefreshTokenRequest, db: DbSession = Depends(get_db)):
     new_access_token = create_jwt_token(user)
     return {"access_token": new_access_token, "refresh_token": new_refresh_token}
     
+import json
+import urllib.request
+import urllib.parse
+from starlette.responses import RedirectResponse
+
+def exchange_google_code_for_token(code: str) -> dict:
+    token_url = "https://oauth2.googleapis.com/token"
+    payload = urllib.parse.urlencode({
+        "code": code,
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "client_secret": settings.GOOGLE_CLIENT_SECRET,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        token_url,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to exchange token with Google: {error_body}",
+        )
+
+# Google OAuth
+@app.get("/oauth/google/login")
+def google_login():
+    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_REDIRECT_URI:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google OAuth is not configured properly in .env",
+        )
+    state = secrets.token_urlsafe(32)
+    auth_params = urllib.parse.urlencode({
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "email profile openid",
+        "state": state,
+    })
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{auth_params}"
+    response = RedirectResponse(auth_url)
+    response.set_cookie("google_state", state, httponly=True, secure=False, samesite="lax", max_age=60*10)
+    return response
+
+@app.get("/oauth/google/callback")
+def google_callback(
+    code: str,
+    state: str,
+    response: Response,
+    google_state: str | None = Cookie(default=None),
+    db: DbSession = Depends(get_db),
+):
+    if state != google_state:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid state (received query state={state!r}, cookie state={google_state!r}). Make sure you are using the same host (localhost vs 127.0.0.1) as GOOGLE_REDIRECT_URI.",
+        )
+    if not code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No code provided",
+        )
+
+    response.delete_cookie("google_state")
+    token_response = exchange_google_code_for_token(code)
+    if token_response:
+        return {"message":"Google OAuth is working", "data":token_response}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to exchange code for token",
+        )
