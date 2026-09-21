@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .security import hash_password, verify_password
 from database import get_db
-from models import UserDatabase, Session, RefreshToken
+from models import UserDatabase, Session, RefreshToken, OauthAccount
 
 app = FastAPI()
 
@@ -403,17 +403,22 @@ def jwt_refresh(request: RefreshTokenRequest, db: DbSession = Depends(get_db)):
 import json
 import urllib.request
 import urllib.parse
-from starlette.responses import RedirectResponse
+from google.oauth2 import id_token
+from google.auth.transport import requests
+from starlette.responses import RedirectResponse, JSONResponse
 
-def exchange_google_code_for_token(code: str) -> dict:
+def exchange_google_code_for_token(code: str, nonce: str | None = None) -> dict:
     token_url = "https://oauth2.googleapis.com/token"
-    payload = urllib.parse.urlencode({
+    token_data = {
         "code": code,
         "client_id": settings.GOOGLE_CLIENT_ID,
         "client_secret": settings.GOOGLE_CLIENT_SECRET,
         "redirect_uri": settings.GOOGLE_REDIRECT_URI,
         "grant_type": "authorization_code",
-    }).encode("utf-8")
+    }
+    if nonce:
+        token_data["nonce"] = nonce
+    payload = urllib.parse.urlencode(token_data).encode("utf-8")
 
     req = urllib.request.Request(
         token_url,
@@ -439,6 +444,7 @@ def google_login():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Google OAuth is not configured properly in .env",
         )
+    nonce = secrets.token_urlsafe(32)
     state = secrets.token_urlsafe(32)
     auth_params = urllib.parse.urlencode({
         "client_id": settings.GOOGLE_CLIENT_ID,
@@ -446,10 +452,12 @@ def google_login():
         "response_type": "code",
         "scope": "email profile openid",
         "state": state,
+        "nonce":nonce
     })
     auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{auth_params}"
     response = RedirectResponse(auth_url)
     response.set_cookie("google_state", state, httponly=True, secure=False, samesite="lax", max_age=60*10)
+    response.set_cookie("google_nonce", nonce, httponly=True, secure=False, samesite="lax", max_age=60*10)
     return response
 
 @app.get("/oauth/google/callback")
@@ -458,6 +466,7 @@ def google_callback(
     state: str,
     response: Response,
     google_state: str | None = Cookie(default=None),
+    google_nonce: str | None = Cookie(default=None),
     db: DbSession = Depends(get_db),
 ):
     if state != google_state:
@@ -470,13 +479,126 @@ def google_callback(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No code provided",
         )
-
-    response.delete_cookie("google_state")
-    token_response = exchange_google_code_for_token(code)
-    if token_response:
-        return {"message":"Google OAuth is working", "data":token_response}
-    else:
+    if not google_nonce:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to exchange code for token",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid nonce",
         )
+    token_response = exchange_google_code_for_token(code)
+
+    # 1. Verify ID token + nonce
+    try:
+        id_info = id_token.verify_oauth2_token(
+            token_response['id_token'],
+            requests.Request(),
+            settings.GOOGLE_CLIENT_ID,
+            clock_skew_in_seconds=10,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid Google ID token: {e}",
+        )
+    if id_info.get('nonce') != google_nonce:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid nonce",
+        )
+    if id_info.get('iss') not in ["accounts.google.com", "https://accounts.google.com"]:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid issuer",
+        )
+
+    # 2. Get Google `sub`
+    google_sub = id_info.get("sub")
+    email = id_info.get("email")
+    if not google_sub or not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing 'sub' or 'email' in Google ID token",
+        )
+
+    # 3. Find OAuth account
+    oauth_account = db.query(OauthAccount).filter(
+        OauthAccount.provider == "google",
+        OauthAccount.provider_user_id == google_sub,
+    ).first()
+
+    if oauth_account:
+        # Found -> get local user
+        user = db.query(UserDatabase).filter(UserDatabase.id == oauth_account.user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User linked to Google account not found",
+            )
+    else:
+        # Not found -> Find local user by email
+        user = db.query(UserDatabase).filter(UserDatabase.email == email).first()
+        if user:
+            # Found -> link Google account
+            oauth_account = OauthAccount(
+                user_id=user.id,
+                provider="google",
+                provider_user_id=google_sub,
+            )
+            db.add(oauth_account)
+            db.commit()
+        else:
+            # Not found -> create local user
+            base_username = email.split("@")[0] or f"user_{google_sub[:8]}"
+            username = base_username
+            suffix = 1
+            while db.query(UserDatabase).filter(UserDatabase.username == username).first():
+                username = f"{base_username}_{suffix}"
+                suffix += 1
+
+            # If the database model allows null password_hash, use None; otherwise generate a random unusable hash
+            pwd_hash = None if getattr(UserDatabase.password_hash, "nullable", False) else hash_password(secrets.token_urlsafe(32))
+
+            user = UserDatabase(
+                username=username,
+                email=email,
+                password_hash=pwd_hash,
+                is_active=True,
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            # Link Google account
+            oauth_account = OauthAccount(
+                user_id=user.id,
+                provider="google",
+                provider_user_id=google_sub,
+            )
+            db.add(oauth_account)
+            db.commit()
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User is not active",
+        )
+
+    # 4. Create OUR application session
+    session_id = create_session(user.id, db)
+
+    # 5. Return JSONResponse with session cookie set and temporary oauth cookies deleted
+    res = JSONResponse(content={"message": "Login successful"})
+    res.delete_cookie("google_state", path="/")
+    res.delete_cookie("google_nonce", path="/")
+    res.set_cookie(
+        key="session_id",
+        value=session_id,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=86400,
+        path="/",
+    )
+
+    # 6. Done
+    return res
+
