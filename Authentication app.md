@@ -734,7 +734,7 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
 in .env
 ```env
-JWT_SECRET_KEY="sjngkrg45kw4ntpwoihgnklrni5"
+JWT_SECRET_KEY="<JWT_SECRET_KEY>"
 ```
 
 >[!NOTE]
@@ -870,7 +870,7 @@ find user
 ```
 
 >[!NOTE]
->If payload changes in the generated token, token will be invalidated 
+>If payload changes detected in the generated token, token will be invalidated 
 
 
 ```
@@ -893,7 +893,7 @@ signature no longer matches
 
 Used to get new access token.
 
-If an user using the app for more than 15 mins and access token expiration is only 15 mins, refresh token will create new access token after every 15 mins untill user logs out. 
+If an user using the app for more than 15 mins and access token expiration is only 15 mins, refresh token will create new access token after every 15 mins until user logs out. 
 
 ```
                     Login
@@ -1028,7 +1028,7 @@ def jwt_refresh(request: RefreshTokenRequest, db: DbSession = Depends(get_db)):
 
 > Family tree
 
-If refresh token C created by B and B created A and A is reused by attacker which is revoked means all the tokens created via A might also compromised so revoke all the tokens. 
+If refresh token C created by B and B created by A and A is reused by attacker which is revoked means all the tokens created via A might also compromised so revoke all the tokens. 
 
 Have a column called family_id which marks the tree of token creation C from B, B from A ...
 ```python
@@ -1066,3 +1066,548 @@ if stored_token.revoked:
 - Refresh-token rotation ✅
 - Refresh-token family tracking ✅
 - Reuse detection + family revocation ✅
+---
+
+## OAuth -> An Authorization framework
+
+If user wants to sign in to my application using google.
+
+| OAuth term               | In our example                                |
+| ------------------------ | --------------------------------------------- |
+| **Resource Owner**       | The user                                      |
+| **Client**               | Your FastAPI application                      |
+| **Authorization Server** | Google                                        |
+| **Resource Server**      | Google's API that holds user data             |
+| **Authorization Code**   | Temporary code Google gives your app          |
+| **Access Token**         | Credential your app uses to call Google's API |
+| **Redirect URI**         | Your FastAPI callback endpoint                |
+
+**Browser:** carries the authorization code.
+**Backend:** exchanges the code for tokens.
+
+```
+User
+ ↓
+FastAPI
+ ↓
+Google authorization
+ ↓
+Authorization Code
+ ↓
+FastAPI backend
+ ↓
+Token exchange
+ ↓
+Access Token
+ ↓
+Google API
+```
+
+- Create a project in google cloud
+- Create an app
+- Create an OAuth client (Web app)
+	- Authorized redirect url -> http://localhost:8000/oauth/google/callback
+	- client id -> <GOOGLE_CLIENT_ID>
+	- client secret -> <GOOGLE_CLIENT_SECRET>
+
+> Google needs to know **what information your application is asking the user to authorize**.
+
+Add scope
+- under data access, select openid, email and profile
+	- openid -> I want to use OpenID Connect to establish the user's identity.
+	- email -> Allows the application to obtain the user's email identity information.
+	- profile -> Allows basic profile information such as the user's name and profile-related claims.
+Then add a test user, once its added, google side configuration is completed.
+
+> login with google means the following.
+
+```
+OAuth 2.0
+   ↓
+Authorization framework
+
+OpenID Connect
+   ↓
+Identity layer built on OAuth 2.0
+   ↓
+"Who is this Google user?"
+```
+
+
+**OAuth 2.0 + OpenID Connect (OIDC)**
+- OAuth handles the authorization flow.
+- OIDC handles authentication/identity.
+
+> OAuth flow
+
+When the user clicks:
+**Login with Google** ->  FastAPI application will redirect the browser to Google's **authorization endpoint**.
+
+The following will be sent to google
+```
+https://accounts.google.com/o/oauth2/v2/auth
+    ?client_id=YOUR_CLIENT_ID
+    &redirect_uri=http://localhost:8000/oauth/google/callback
+    &response_type=code
+    &scope=openid email profile
+    &state=SOME_RANDOM_VALUE
+```
+
+- client_id -> which google application making the request
+- redirect_uri -> after authorization, send the user to specified url
+- response_type=code -> this says "Don't give me an access token directly in the browser. Give me an authorization code."
+- scope -> This tells Google what access/identity information we're requesting
+- state=random_value -> Your application should generate a **cryptographically random state value** before redirecting the user.
+	- For example:
+```
+state = random_value
+```
+Your application remembers that value.
+
+Google eventually redirects:
+```
+/oauth/google/callback?code=...&state=random_value
+```
+Your application checks:
+```
+state_from_google == state_we_generated
+```
+If they don't match:
+```
+❌ Reject the request
+```
+Why?
+Because `state` protects the OAuth authorization flow against **CSRF/login-request forgery attacks**.
+
+>[!NOTE]
+>`state` lets your application verify that the callback it receives belongs to an OAuth flow that your application actually initiated for that user's browser session.
+
+>`state` binds the OAuth callback to the browser/session that initiated the authorization request.
+
+```
+User
+ ↓
+FastAPI /oauth/google/login
+ ↓
+Redirect to Google
+ ↓
+User authenticates/authorizes
+ ↓
+Google → callback with authorization code
+ ↓
+FastAPI exchanges code for tokens
+ ↓
+FastAPI gets user's identity
+```
+
+For:
+
+```
+GET /oauth/google/login
+```
+
+the job is actually quite small:
+
+1. Generate a secure random `state`.
+2. Construct Google's authorization URL.
+3. Include:
+    - `client_id`
+    - `redirect_uri`
+    - `response_type=code`
+    - `scope=openid email profile`
+    - `state`
+4. Redirect the browser to Google.
+
+```
+Browser
+   │
+   │ 1. GET /oauth/google/login
+   ↓
+FastAPI
+   │
+   │ 2. Generate random state
+   │
+   │ 3. Set state in browser
+   │
+   │ 4. Redirect to Google
+   ↓
+Google
+   │
+   │ 5. User authenticates + authorizes
+   ↓
+Browser
+   │
+   │ 6. GET /oauth/google/callback?code=...&state=...
+   ↓
+FastAPI
+   │
+   │ 7. Compare returned state
+   │    with state stored in browser
+   ↓
+   │
+   ├── Match → continue
+   └── Mismatch → reject
+```
+
+
+```
+FastAPI
+   ↓
+Generate state
+   ↓
+Set state cookie
+   ↓
+Build authorization URL
+   ↓
+Redirect to Google
+   ↓
+Google authorization page
+```
+
+
+```python
+import urllib, os
+from starlette.responses import RedirectResponse
+
+# Google OAuth
+@app.get("/oauth/google/login")
+def google_login():
+    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_REDIRECT_URI:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google OAuth is not configured properly in .env",
+        )
+    state = secrets.token_urlsafe(32)
+    auth_params = urllib.parse.urlencode({
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "email profile openid",
+        "state": state,
+    })
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{auth_params}"
+    response = RedirectResponse(auth_url)
+    response.set_cookie("gooe_state", state, httponly=True, secure=False, samesite="lax", max_age=60*10)
+    return response
+  
+from fastapi import Request, Cookie
+@app.get("/oauth/google/callback")
+def google_callback(code: str,state: str, google_state: str | None = Cookie(default=None), db: DbSession = Depends(get_db)
+                    ):
+    if state != google_state:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid state",
+        )
+    if not code:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No code provided",
+        )
+    return {"message": "Google OAuth is working"}
+```
+
+```
+/login
+  ↓
+generate state
+  ↓
+state cookie
+  ↓
+Google
+  ↓
+callback
+  ↓
+verify state ✅
+  ↓
+authorization code
+```
+
+
+> Exchange token for authorization code.
+
+To exchange token make request directly to google's endpoint
+
+```
+Browser → FastAPI callback
+              ↓
+        authorization code
+              ↓
+        FastAPI → Google token endpoint
+              ↓
+        access token (+ ID token)
+```
+
+```python
+def exchange_google_code_for_token(code: str) -> dict:
+    token_url = "https://oauth2.googleapis.com/token"
+    payload = urllib.parse.urlencode({
+        "code": code,
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "client_secret": settings.GOOGLE_CLIENT_SECRET,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }).encode("utf-8")
+  
+    req = urllib.request.Request(
+        token_url,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to exchange token with Google: {error_body}",
+        )
+```
+
+> Response from google
+```json
+{
+  "access_token": "<ACCESS_TOKEN>",
+  "expires_in": 3599,
+  "scope": "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email openid",
+  "token_type": "Bearer",
+  "id_token": "<ID_TOKEN>"
+}
+```
+
+| Field          | Purpose                                                                       |
+| -------------- | ----------------------------------------------------------------------------- |
+| `access_token` | Credential used to call Google's protected APIs                               |
+| `expires_in`   | How long the access token is valid                                            |
+| `scope`        | Permissions Google granted                                                    |
+| `token_type`   | Usually `Bearer`                                                              |
+| `id_token`     | **OIDC identity token** — contains claims about the authenticated Google user |
+id_token is like the jwt token which contains information of the request like user, mail etc..
+
+id_token will have the following
+
+```json
+{
+  "iss": "https://accounts.google.com",
+  "azp": "<GOOGLE_CLIENT_ID>",
+  "aud": "<GOOGLE_CLIENT_ID>",
+  "sub": "<GOOGLE_SUB>",
+  "email": "<USER_EMAIL>",
+  "email_verified": true,
+  "at_hash": "<AT_HASH>",
+  "name": "<NAME>",
+  "picture": "<PICTURE_URL>",
+  "given_name": "<GIVEN_NAME>",
+  "iat": 1789912530,
+  "exp": 1789916130
+}
+```
+
+```
+                 Browser
+                    │
+                    │ state + nonce
+                    ▼
+                  Google
+                    │
+              authorization
+                    │
+                    ▼
+              callback(code, state)
+                    │
+                    ├── verify state
+                    │
+                    └── later verify nonce
+```
+
+
+`state` and `nonce` serve **different purposes**:
+- **state** → protects the OAuth authorization flow / callback from CSRF and request mix-up.
+- **nonce** → binds the OIDC ID token to the authentication request that initiated this login.
+
+```
+pip install google-auth
+```
+
+```
+Google ID token
+        ↓
+verify signature + issuer + audience + expiry + nonce
+        ↓
+sub = "google's unique user identifier"
+        ↓
+find Google identity in our DB
+        ↓
+local user_id = 42
+        ↓
+create OUR session
+        ↓
+browser receives OUR session cookie
+```
+
+>`sub` is the identifier for the Google subject.
+
+OAuth model
+```python
+class OauthAccount(Base):
+    __tablename__ = "oauth_accounts"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
+    provider = Column(String, nullable=False)
+    provider_user_id = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    user = relationship("UserDatabase", back_populates="oauth_accounts")
+    __table_args__ = (UniqueConstraint("provider", "provider_user_id", name="unique_provider_user_id"),)
+```
+
+---
+
+```python
+@app.get("/oauth/google/callback")
+def google_callback(
+    code: str,
+    state: str,
+    response: Response,
+    google_state: str | None = Cookie(default=None),
+    google_nonce: str | None = Cookie(default=None),
+    db: DbSession = Depends(get_db),
+):
+    if state != google_state:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=fInvalid state (received query state={state!r}, cookie state={google_state!r}). Mae sure you are using the same host (localhost vs 127.0.0.1) as GOOGLE_REDIRECT_URI.",
+        )
+    if not code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No code provided",
+        )
+    if not google_nonce:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid nonce",
+        )
+    token_response = exchange_google_code_for_token(code)
+  
+    # 1. Verify ID token + nonce
+    try:
+        id_info = id_token.verify_oauth2_token(
+            token_response['id_token'],
+            requests.Request(),
+            settings.GOOGLE_CLIENT_ID,
+            clock_skew_in_seconds=10,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid Google ID token: {e}",
+        )
+    if id_info.get('nonce') != google_nonce:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid nonce",
+        )
+    if id_info.get('iss') not in ["accounts.google.com", "https://accounts.google.com"]:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid issuer",
+        )
+  
+    # 2. Get Google `sub`
+    google_sub = id_info.get("sub")
+    email = id_info.get("email")
+    if not google_sub or not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing 'sub' or 'email' in Google ID token",
+        )
+  
+    # 3. Find OAuth account
+    oauth_account = db.query(OauthAccount).filter(
+        OauthAccount.provider == "google",
+        OauthAccount.provider_user_id == google_sub,
+    ).first()
+  
+
+    if oauth_account:
+
+        # Found -> get local user
+
+        user = db.query(UserDatabase).filter(UserDatabase.id == oauth_account.user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User linked to Google account not found",
+            )
+    else:
+        # Not found -> Find local user by email
+        user = db.query(UserDatabase).filter(UserDatabase.email == email).first()
+        if user:
+            # Found -> link Google accout
+
+            oauth_account = OauthAccount(
+                user_id=user.id,
+                provider="google",
+                provider_user_id=google_sub,
+            )
+            db.add(oauth_account)
+            db.commit()
+        else:
+            # Not found -> create local user
+            base_username = email.split("@")[0] or f"user_{google_sub[:8]}"
+            username = base_username
+            suffix = 1
+            while db.query(UserDatabase).filter(UserDatabase.username == username).first():
+                username = f"{base_username}_{suffix}"
+                suffix += 1
+  
+            # If the database odel allows null password_hash, use None; otherwise generate a random unusable hash
+            pwd_hash = None if getattr(UserDatabase.password_hash, "nullable", False) else hash_password(secrets.token_urlsafe(32))
+  
+            user = UserDatabase(
+                username=username,
+                email=email,
+                password_hash=pwd_hash,
+                is_active=True,
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+  
+            # Link Google account
+            oauth_account = OauthAccount(
+                user_id=user.id,
+                provider="google",
+                provider_user_id=google_sub,
+            )
+            db.add(oauth_account)
+            db.commit()
+  
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User is not active",
+        )
+  
+    # 4. Create OUR application session
+    session_id = create_session(user.id, db)
+  
+    # 5. Return JSONResponse with session cookie set and temporary oauth cookies deleted
+    res = JSONResponse(content={"message": "Login successful"})
+    res.delete_cookie("google_state", path="/")
+    res.delete_cookie("google_nonce", path="/")
+    res.set_cookie(
+        key="session_id",
+        value=session_id,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=86400,
+        path="/",
+    )
+    # 6. Done
+    return res
+```
