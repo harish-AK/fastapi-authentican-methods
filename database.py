@@ -1,7 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-
-DATABASE_URL = "postgresql+psycopg://postgres:root@localhost:5432/auth_methods"
+from settings import DATABASE_URL
 
 engine = create_engine(DATABASE_URL)
 
