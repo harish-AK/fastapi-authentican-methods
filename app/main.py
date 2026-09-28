@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .security import hash_password, verify_password
 from database import get_db
-from models import UserDatabase, Session, RefreshToken, OauthAccount
+from models import UserDatabase, Session, RefreshToken, OauthAccount, Application
 
 app = FastAPI()
 
@@ -602,3 +602,138 @@ def google_callback(
     # 6. Done
     return res
 
+# -----------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------
+# =================================== AUTH APP SERVICE ==========================================
+# -----------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------
+
+
+class BasicAuthPayload(BaseModel):
+    app_id: int
+    username: str
+    password: str
+    email: EmailStr | None = None
+    app_name: str | None = None
+
+
+class BasicAuthResponse(BaseModel):
+    status: str
+    message: str
+    app_id: int
+    user_id: int
+    username: str
+    email: str
+
+
+@app.post("/basic-auth", response_model=BasicAuthResponse)
+def basic_auth_service(payload: BasicAuthPayload, db: DbSession = Depends(get_db)):
+    # 1. Query Application to find whether app exists or not
+    app_record = db.query(Application).filter(Application.id == payload.app_id).first()
+
+    # If app_id does not exist, insert Application and insert the user
+    if not app_record:
+        app_name = payload.app_name or f"Application-{payload.app_id}"
+        api_key_hash = hashlib.sha256(f"{payload.app_id}_{secrets.token_hex(16)}".encode()).hexdigest()
+
+        app_record = Application(
+            id=payload.app_id,
+            app_name=app_name,
+            api_key_hash=api_key_hash,
+        )
+        db.add(app_record)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not create application with provided app_id",
+            )
+
+        # Insert user for the newly created app
+        user_email = payload.email or f"{payload.username}@app{payload.app_id}.com"
+        new_user = UserDatabase(
+            app_id=app_record.id,
+            username=payload.username,
+            email=user_email,
+            password_hash=hash_password(payload.password),
+            is_active=True,
+        )
+        db.add(new_user)
+        try:
+            db.commit()
+            db.refresh(new_user)
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User with this username or email already exists",
+            )
+
+        return BasicAuthResponse(
+            status="registered",
+            message="New application and user created successfully",
+            app_id=app_record.id,
+            user_id=new_user.id,
+            username=new_user.username,
+            email=new_user.email,
+        )
+
+    # 2. If app already exists, query user under this app
+    user = db.query(UserDatabase).filter(
+        UserDatabase.app_id == app_record.id,
+        UserDatabase.username == payload.username,
+    ).first()
+
+    # If user doesn't exist under this application, register the user
+    if not user:
+        user_email = payload.email or f"{payload.username}@app{payload.app_id}.com"
+        new_user = UserDatabase(
+            app_id=app_record.id,
+            username=payload.username,
+            email=user_email,
+            password_hash=hash_password(payload.password),
+            is_active=True,
+        )
+        db.add(new_user)
+        try:
+            db.commit()
+            db.refresh(new_user)
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User with this username or email already exists",
+            )
+
+        return BasicAuthResponse(
+            status="registered",
+            message="User created under existing application",
+            app_id=app_record.id,
+            user_id=new_user.id,
+            username=new_user.username,
+            email=new_user.email,
+        )
+
+    # 3. User exists -> verify credentials
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is inactive",
+        )
+
+    return BasicAuthResponse(
+        status="verified",
+        message="User verified successfully",
+        app_id=app_record.id,
+        user_id=user.id,
+        username=user.username,
+        email=user.email,
+    )

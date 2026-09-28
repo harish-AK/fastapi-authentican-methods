@@ -2,9 +2,23 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, func, Foreign
 from database import Base
 from sqlalchemy.orm import relationship
 
+# 1. NEW TABLE: Represents the developer's web app using your service
+class Application(Base):
+    __tablename__ = "applications"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    app_name = Column(String, nullable=False)
+    api_key_hash = Column(String(64), nullable=False, unique=True) # To verify the app's request
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationship to users belonging to this specific app
+    users = relationship("UserDatabase", back_populates="application", cascade="all, delete-orphan")
+
+
 class UserDatabase(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
+    app_id=Column(Integer,ForeignKey("applications.id", ondelete="CASCADE"),nullable=False)
     username = Column(String, nullable=False,unique=True)
     password_hash = Column(String, nullable=False)
     email = Column(String, nullable=False,unique=True)
@@ -13,6 +27,10 @@ class UserDatabase(Base):
     sessions = relationship("Session", back_populates="user")
     refresh_tokens = relationship("RefreshToken", back_populates="user")
     oauth_accounts = relationship("OauthAccount", back_populates="user")
+    application = relationship("Application", back_populates="users")
+    __table_args__ = (UniqueConstraint("app_id", "username", name="unique_app_username"),
+    UniqueConstraint("app_id", "email", name="unique_app_email"))
+
 
 class Session(Base):
     __tablename__ = "sessions"
