@@ -13,6 +13,7 @@ class Application(Base):
     
     # Relationship to users belonging to this specific app
     users = relationship("UserDatabase", back_populates="application", cascade="all, delete-orphan")
+    sessions = relationship("Session", back_populates="application", cascade="all, delete-orphan")
 
 
 class UserDatabase(Base):
@@ -37,9 +38,11 @@ class Session(Base):
     id = Column(Integer, primary_key=True)
     session_id_hash = Column(String(64), nullable=False,unique=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
+    app_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=False)
     user = relationship("UserDatabase", back_populates="sessions")
+    application = relationship("Application", back_populates="sessions")
 
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"

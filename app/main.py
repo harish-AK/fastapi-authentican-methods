@@ -3,6 +3,7 @@ import hashlib
 import secrets
 
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Cookie
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session as DbSession
@@ -11,8 +12,17 @@ from sqlalchemy.exc import IntegrityError
 from .security import hash_password, verify_password
 from database import get_db
 from models import UserDatabase, Session, RefreshToken, OauthAccount, Application
+from settings import ORIGINS
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def read_root():
@@ -130,14 +140,19 @@ def generate_session_id() -> str:
 def hash_session_id(session_id: str) -> str:
     return hashlib.sha256(session_id.encode()).hexdigest()
 
-def create_session(user_id: int, db: DbSession) -> str:
+def create_session(user_id: int, db: DbSession, app_id: int | None = None) -> str:
     session_id = generate_session_id()
     session_id_hash = hash_session_id(session_id)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    if app_id is None:
+        user = db.query(UserDatabase).filter(UserDatabase.id == user_id).first()
+        app_id = user.app_id if user else None
+
     new_session = Session(
         session_id_hash=session_id_hash,
         user_id=user_id,
-        expires_at=expires_at
+        app_id=app_id,
+        expires_at=expires_at,
     )
     try:
         db.add(new_session)
@@ -736,4 +751,121 @@ def basic_auth_service(payload: BasicAuthPayload, db: DbSession = Depends(get_db
         user_id=user.id,
         username=user.username,
         email=user.email,
-    )
+    )
+
+### Session Auth 
+
+
+class SessionAuthPayload(BaseModel):
+    app_id: int
+    username: str
+    password: str
+    email: EmailStr | None = None
+    app_name: str | None = None
+
+
+class SessionAuthResponse(BaseModel):
+    status: str
+    message: str
+    app_id: int
+    user_id: int
+    username: str
+    email: str
+    session_id: str
+
+
+@app.post("/session-auth", response_model=SessionAuthResponse)
+def session_auth_service(
+    payload: SessionAuthPayload,
+    response: Response,
+    db: DbSession = Depends(get_db),
+):
+    # 1. Query Application to find whether app exists or not
+    app_record = db.query(Application).filter(Application.id == payload.app_id).first()
+
+    if not app_record:
+        app_name = payload.app_name or f"Application-{payload.app_id}"
+        api_key_hash = hashlib.sha256(f"{payload.app_id}_{secrets.token_hex(16)}".encode()).hexdigest()
+
+        app_record = Application(
+            id=payload.app_id,
+            app_name=app_name,
+            api_key_hash=api_key_hash,
+        )
+        db.add(app_record)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not create application with provided app_id",
+            )
+
+    # 2. Check if user exists under this app
+    user = db.query(UserDatabase).filter(
+        UserDatabase.app_id == app_record.id,
+        UserDatabase.username == payload.username,
+    ).first()
+
+    status_str = "authenticated"
+    message_str = "Login successful"
+
+    # If username doesn't exist, create it (register)
+    if not user:
+        user_email = payload.email or f"{payload.username}@app{payload.app_id}.com"
+        user = UserDatabase(
+            app_id=app_record.id,
+            username=payload.username,
+            email=user_email,
+            password_hash=hash_password(payload.password),
+            is_active=True,
+        )
+        db.add(user)
+        try:
+            db.commit()
+            db.refresh(user)
+            status_str = "registered"
+            message_str = "New user registered and logged in"
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User with this username or email already exists",
+            )
+    else:
+        # If user exists, reuse and verify credentials
+        if not verify_password(payload.password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+            )
+
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User account is inactive",
+            )
+
+    # 3. Create session with user_id and app_id
+    session_id = create_session(user_id=user.id, db=db, app_id=app_record.id)
+
+    # 4. Set cookie on the response so the browser receives it
+    response.set_cookie(
+        key="session_id",
+        value=session_id,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=86400,
+    )
+
+    return SessionAuthResponse(
+        status=status_str,
+        message=message_str,
+        app_id=app_record.id,
+        user_id=user.id,
+        username=user.username,
+        email=user.email,
+        session_id=session_id,
+    )
