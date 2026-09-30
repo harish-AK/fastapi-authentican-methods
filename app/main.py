@@ -342,7 +342,7 @@ def jwt_profile(current_user: UserDatabase = Depends(get_current_user_jwt)):
     return {"username": current_user.username, "email": current_user.email, "id": current_user.id}
 
 
-def create_refresh_token(user: UserDatabase, db: DbSession, family_id: str | None = None):
+def create_refresh_token(user: UserDatabase, db: DbSession, app_id: int | None = None, family_id: str | None = None):
     refresh_token = secrets.token_urlsafe(64)
     refresh_token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
@@ -350,9 +350,13 @@ def create_refresh_token(user: UserDatabase, db: DbSession, family_id: str | Non
     if family_id is None:
         family_id = secrets.token_urlsafe(32)
 
+    if app_id is None:
+        app_id = user.app_id
+
     new_refresh_token = RefreshToken(
         refresh_token_hash=refresh_token_hash,
         user_id=user.id,
+        app_id=app_id,
         expires_at=expires_at,
         family_id=family_id
     )
@@ -869,3 +873,201 @@ def session_auth_service(
         email=user.email,
         session_id=session_id,
     )
+
+### JWT Auth ###
+
+
+class JwtAuthPayload(BaseModel):
+    app_id: int
+    username: str
+    password: str
+    email: EmailStr | None = None
+    app_name: str | None = None
+
+
+class JwtAuthResponse(BaseModel):
+    status: str
+    message: str
+    app_id: int
+    user_id: int
+    username: str
+    email: str
+    access_token: str
+    token_type: str = "bearer"
+    refresh_token: str
+
+
+def create_app_jwt_token(user: UserDatabase, app_id: int) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user.id),
+        "username": user.username,
+        "email": user.email,
+        "app_id": app_id,
+        "iat": now,
+        "exp": now + timedelta(minutes=60),
+    }
+    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm="HS256")
+
+
+@app.post("/jwt-auth", response_model=JwtAuthResponse)
+def jwt_auth_service(payload: JwtAuthPayload, db: DbSession = Depends(get_db)):
+    # 1. Query Application to find whether app exists or not
+    app_record = db.query(Application).filter(Application.id == payload.app_id).first()
+
+    if not app_record:
+        app_name = payload.app_name or f"Application-{payload.app_id}"
+        api_key_hash = hashlib.sha256(f"{payload.app_id}_{secrets.token_hex(16)}".encode()).hexdigest()
+
+        app_record = Application(
+            id=payload.app_id,
+            app_name=app_name,
+            api_key_hash=api_key_hash,
+        )
+        db.add(app_record)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not create application with provided app_id",
+            )
+
+    # 2. Check if user exists under this app
+    user = db.query(UserDatabase).filter(
+        UserDatabase.app_id == app_record.id,
+        UserDatabase.username == payload.username,
+    ).first()
+
+    status_str = "authenticated"
+    message_str = "Login successful"
+
+    # If user doesn't exist, create/register
+    if not user:
+        user_email = payload.email or f"{payload.username}@app{payload.app_id}.com"
+        user = UserDatabase(
+            app_id=app_record.id,
+            username=payload.username,
+            email=user_email,
+            password_hash=hash_password(payload.password),
+            is_active=True,
+        )
+        db.add(user)
+        try:
+            db.commit()
+            db.refresh(user)
+            status_str = "registered"
+            message_str = "New user registered and tokens generated"
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User with this username or email already exists",
+            )
+    else:
+        # If user exists, verify password
+        if not verify_password(payload.password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+            )
+
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User account is inactive",
+            )
+
+    # 3. Generate access token (containing user & app)
+    access_token = create_app_jwt_token(user=user, app_id=app_record.id)
+
+    # 4. Generate refresh token and save in DB
+    refresh_token = create_refresh_token(user=user, db=db, app_id=app_record.id)
+
+    return JwtAuthResponse(
+        status=status_str,
+        message=message_str,
+        app_id=app_record.id,
+        user_id=user.id,
+        username=user.username,
+        email=user.email,
+        access_token=access_token,
+        token_type="bearer",
+        refresh_token=refresh_token,
+    )
+
+
+class JwtRefreshPayload(BaseModel):
+    refresh_token: str
+
+
+class JwtRefreshResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    refresh_token: str
+    app_id: int
+    user_id: int
+
+
+@app.post("/jwt-auth/refresh", response_model=JwtRefreshResponse)
+def jwt_auth_refresh_service(payload: JwtRefreshPayload, db: DbSession = Depends(get_db)):
+    raw_token = payload.refresh_token
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+
+    # 1. Query token in DB
+    stored_token = db.query(RefreshToken).filter(
+        RefreshToken.refresh_token_hash == token_hash
+    ).first()
+
+    if not stored_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+        )
+
+    if stored_token.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token expired",
+        )
+
+    # 2. Reuse Detection: if an already revoked token is used, revoke the entire family
+    if stored_token.revoked:
+        db.query(RefreshToken).filter(
+            RefreshToken.family_id == stored_token.family_id
+        ).update({"revoked": True})
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Revoked refresh token reused. All tokens in this family have been invalidated.",
+        )
+
+    user = stored_token.user
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+        )
+
+    # 3. Revoke current token (Refresh Token Rotation)
+    stored_token.revoked = True
+
+    # 4. Mint new refresh token (preserving family_id & app_id) and new access token (with user & app)
+    new_refresh_token = create_refresh_token(
+        user=user,
+        db=db,
+        app_id=stored_token.app_id,
+        family_id=stored_token.family_id,
+    )
+    new_access_token = create_app_jwt_token(user=user, app_id=stored_token.app_id)
+
+    return JwtRefreshResponse(
+        access_token=new_access_token,
+        token_type="bearer",
+        refresh_token=new_refresh_token,
+        app_id=stored_token.app_id,
+        user_id=user.id,
+    )
+
+

@@ -14,6 +14,7 @@ class Application(Base):
     # Relationship to users belonging to this specific app
     users = relationship("UserDatabase", back_populates="application", cascade="all, delete-orphan")
     sessions = relationship("Session", back_populates="application", cascade="all, delete-orphan")
+    refresh_tokens = relationship("RefreshToken", back_populates="application", cascade="all, delete-orphan")
 
 
 class UserDatabase(Base):
@@ -49,10 +50,12 @@ class RefreshToken(Base):
     id = Column(Integer, primary_key=True)
     refresh_token_hash = Column(String(64), nullable=False,unique=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
+    app_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=False)
     revoked = Column(Boolean, default=False,nullable=False)
     user = relationship("UserDatabase", back_populates="refresh_tokens")
+    application = relationship("Application", back_populates="refresh_tokens")
     family_id = Column(String(64), nullable=False, index=True)
 
 class OauthAccount(Base):
