@@ -15,6 +15,7 @@ class Application(Base):
     users = relationship("UserDatabase", back_populates="application", cascade="all, delete-orphan")
     sessions = relationship("Session", back_populates="application", cascade="all, delete-orphan")
     refresh_tokens = relationship("RefreshToken", back_populates="application", cascade="all, delete-orphan")
+    oauth_accounts = relationship("OauthAccount", back_populates="application", cascade="all, delete-orphan")
 
 
 class UserDatabase(Base):
@@ -67,4 +68,6 @@ class OauthAccount(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     user = relationship("UserDatabase", back_populates="oauth_accounts")
+    application=relationship("Application", back_populates="oauth_accounts")
+    app_id=Column(Integer,ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
     __table_args__ = (UniqueConstraint("provider", "provider_user_id", name="unique_provider_user_id"),)

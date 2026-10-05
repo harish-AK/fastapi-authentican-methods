@@ -426,13 +426,13 @@ from google.oauth2 import id_token
 from google.auth.transport import requests
 from starlette.responses import RedirectResponse, JSONResponse
 
-def exchange_google_code_for_token(code: str, nonce: str | None = None) -> dict:
+def exchange_google_code_for_token(code: str, nonce: str | None = None, redirect_uri: str | None = None) -> dict:
     token_url = "https://oauth2.googleapis.com/token"
     token_data = {
         "code": code,
         "client_id": settings.GOOGLE_CLIENT_ID,
         "client_secret": settings.GOOGLE_CLIENT_SECRET,
-        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "redirect_uri": redirect_uri or settings.GOOGLE_REDIRECT_URI,
         "grant_type": "authorization_code",
     }
     if nonce:
@@ -1069,5 +1069,280 @@ def jwt_auth_refresh_service(payload: JwtRefreshPayload, db: DbSession = Depends
         app_id=stored_token.app_id,
         user_id=user.id,
     )
+
+### OAUTH 2.0 ###
+# Since OAuth is browser-redirect-driven, there is no POST body to pass app_id.
+# We embed app_id into the `state` parameter as "state|app_id" and recover it in the callback.
+
+
+class OAuthTokenResponse(BaseModel):
+    status: str
+    message: str
+    app_id: int
+    user_id: int
+    username: str
+    email: str
+    access_token: str
+    token_type: str = "bearer"
+    refresh_token: str
+
+
+class GoogleOAuthPayload(BaseModel):
+    app_id: int
+    email: EmailStr
+    provider: str = "google"
+    provider_user_id: str | None = None
+    app_name: str | None = None
+
+
+def process_google_oauth_user(
+    app_id: int,
+    email: str,
+    provider_user_id: str | None = None,
+    app_name: str | None = None,
+    provider: str = "google",
+    db: DbSession = None,
+) -> OAuthTokenResponse:
+    google_sub = provider_user_id or hashlib.sha256(f"google_{email.lower()}".encode()).hexdigest()[:21]
+
+    # 1. Find or create Application
+    app_record = db.query(Application).filter(Application.id == app_id).first()
+    if not app_record:
+        api_key_hash = hashlib.sha256(f"{app_id}_{secrets.token_hex(16)}".encode()).hexdigest()
+        app_record = Application(
+            id=app_id,
+            app_name=app_name or f"Application-{app_id}",
+            api_key_hash=api_key_hash,
+        )
+        db.add(app_record)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not create application")
+
+    # 2. Find OauthAccount scoped to this app + provider
+    oauth_account = db.query(OauthAccount).filter(
+        OauthAccount.provider == provider,
+        OauthAccount.provider_user_id == google_sub,
+        OauthAccount.app_id == app_id,
+    ).first()
+
+    status_str = "authenticated"
+    message_str = "Google OAuth login successful"
+
+    if oauth_account:
+        # Already linked -> get existing user
+        user = db.query(UserDatabase).filter(UserDatabase.id == oauth_account.user_id).first()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User linked to OAuth account not found")
+    else:
+        # No OAuth link yet -> find user by (app_id, email)
+        user = db.query(UserDatabase).filter(
+            UserDatabase.app_id == app_id,
+            UserDatabase.email == email,
+        ).first()
+
+        if not user:
+            # New user entirely -> register
+            base_username = email.split("@")[0] or f"user_{google_sub[:8]}"
+            username = base_username
+            suffix = 1
+            while db.query(UserDatabase).filter(
+                UserDatabase.app_id == app_id,
+                UserDatabase.username == username,
+            ).first():
+                username = f"{base_username}_{suffix}"
+                suffix += 1
+
+            user = UserDatabase(
+                app_id=app_id,
+                username=username,
+                email=email,
+                password_hash=hash_password(secrets.token_urlsafe(32)),  # unusable random password
+                is_active=True,
+            )
+            db.add(user)
+            db.flush()
+            status_str = "registered"
+            message_str = "New user registered via Google OAuth"
+
+        # Create OAuth account link for this app
+        oauth_account = OauthAccount(
+            user_id=user.id,
+            app_id=app_id,
+            provider=provider,
+            provider_user_id=google_sub,
+        )
+        db.add(oauth_account)
+
+    try:
+        db.commit()
+        db.refresh(user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Could not save OAuth account")
+
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is inactive")
+
+    # 3. Issue JWT access token + refresh token (same as jwt-auth)
+    access_token = create_app_jwt_token(user=user, app_id=app_id)
+    refresh_token = create_refresh_token(user=user, db=db, app_id=app_id)
+
+    return OAuthTokenResponse(
+        status=status_str,
+        message=message_str,
+        app_id=app_id,
+        user_id=user.id,
+        username=user.username,
+        email=user.email,
+        access_token=access_token,
+        token_type="bearer",
+        refresh_token=refresh_token,
+    )
+
+
+@app.post("/login/google", response_model=OAuthTokenResponse)
+@app.post("/oauth-service/google/login", response_model=OAuthTokenResponse)
+def oauth_service_google_login_post(
+    payload: GoogleOAuthPayload,
+    db: DbSession = Depends(get_db),
+):
+    """
+    Service REST API endpoint:
+    Other backend applications (Django, FastAPI, etc.) call this with:
+        POST /login/google
+        { "app_id": 104, "email": "rough1607@gmail.com", "app_name": "My App" }
+    Stores the application, user, and OAuth account link, then returns JWT access + refresh tokens.
+    """
+    return process_google_oauth_user(
+        app_id=payload.app_id,
+        email=payload.email,
+        provider_user_id=payload.provider_user_id,
+        app_name=payload.app_name,
+        provider=payload.provider,
+        db=db,
+    )
+
+
+@app.get("/oauth-service/google/login")
+def oauth_service_google_login(
+    app_id: int,
+    redirect: bool = True,
+):
+    """
+    Entry point for browser-driven Google OAuth.
+    The client/developer app calls this with their app_id as a query param:
+        GET /oauth-service/google/login?app_id=104
+    - redirect=True (default): Returns HTTP 307 RedirectResponse to Google Sign-In (for browser navigation).
+    - redirect=False: Returns JSON {"status": "ok", "app_id": 104, "auth_url": "...", "state": "..."} (for REST API / SPA clients).
+    Both modes attach the necessary CSRF/nonce verification cookies.
+    """
+    redirect_uri = settings.OAUTH_SERVICE_REDIRECT_URI or settings.GOOGLE_REDIRECT_URI
+    if not settings.GOOGLE_CLIENT_ID or not redirect_uri:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google OAuth is not configured in .env",
+        )
+
+    nonce = secrets.token_urlsafe(32)
+    raw_state = secrets.token_urlsafe(32)
+
+    # Encode app_id into state: "<random_state>.<app_id>"
+    state = f"{raw_state}.{app_id}"
+
+    auth_params = urllib.parse.urlencode({
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "email profile openid",
+        "state": state,
+        "nonce": nonce,
+    })
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{auth_params}"
+
+    if redirect:
+        response = RedirectResponse(auth_url)
+    else:
+        response = JSONResponse(content={
+            "status": "ok",
+            "app_id": app_id,
+            "auth_url": auth_url,
+            "state": state,
+        })
+
+    response.set_cookie("oauth_service_state", raw_state, httponly=True, secure=False, samesite="lax", max_age=600, path="/")
+    response.set_cookie("oauth_service_nonce", nonce, httponly=True, secure=False, samesite="lax", max_age=600, path="/")
+    return response
+
+
+@app.get("/oauth-service/google/callback", response_model=OAuthTokenResponse)
+def oauth_service_google_callback(
+    code: str,
+    state: str,
+    response: Response,
+    oauth_service_state: str | None = Cookie(default=None),
+    oauth_service_nonce: str | None = Cookie(default=None),
+    db: DbSession = Depends(get_db),
+):
+    # 1. Validate state and extract app_id
+    if not state or "." not in state:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid state format")
+
+    raw_state, _, app_id_str = state.rpartition(".")
+    if raw_state != oauth_service_state:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid state (CSRF check failed)")
+
+    try:
+        app_id = int(app_id_str)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid app_id in state")
+
+    if not oauth_service_nonce:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing nonce cookie")
+
+    # 2. Exchange code for tokens with Google (must use same redirect_uri as login)
+    redirect_uri = settings.OAUTH_SERVICE_REDIRECT_URI or settings.GOOGLE_REDIRECT_URI
+    token_response = exchange_google_code_for_token(code, redirect_uri=redirect_uri)
+
+    # 3. Verify Google ID token + nonce
+    try:
+        id_info = id_token.verify_oauth2_token(
+            token_response["id_token"],
+            requests.Request(),
+            settings.GOOGLE_CLIENT_ID,
+            clock_skew_in_seconds=10,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid Google ID token: {e}")
+
+    if id_info.get("nonce") != oauth_service_nonce:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Nonce mismatch")
+
+    if id_info.get("iss") not in ["accounts.google.com", "https://accounts.google.com"]:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid issuer")
+
+    google_sub = id_info.get("sub")
+    email = id_info.get("email")
+    if not google_sub or not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing sub or email from Google")
+
+    # 4. Find or create App, User, OauthAccount and generate tokens
+    token_data = process_google_oauth_user(
+        app_id=app_id,
+        email=email,
+        provider_user_id=google_sub,
+        provider="google",
+        db=db,
+    )
+
+    # 5. Clean up temp cookies and return tokens
+    res = JSONResponse(content=token_data.model_dump())
+    res.delete_cookie("oauth_service_state", path="/")
+    res.delete_cookie("oauth_service_nonce", path="/")
+    return res
+
+
 
 
