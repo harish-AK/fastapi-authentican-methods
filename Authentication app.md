@@ -734,7 +734,7 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
 in .env
 ```env
-JWT_SECRET_KEY="<JWT_SECRET_KEY>"
+JWT_SECRET_KEY="<YOUR_JWT_SECRET_KEY>"
 ```
 
 >[!NOTE]
@@ -1107,8 +1107,8 @@ Google API
 - Create an app
 - Create an OAuth client (Web app)
 	- Authorized redirect url -> http://localhost:8000/oauth/google/callback
-	- client id -> <GOOGLE_CLIENT_ID>
-	- client secret -> <GOOGLE_CLIENT_SECRET>
+	- client id -> <YOUR_GOOGLE_CLIENT_ID>
+	- client secret -> <YOUR_GOOGLE_CLIENT_SECRET>
 
 > Google needs to know **what information your application is asking the user to authorize**.
 
@@ -1391,8 +1391,8 @@ id_token will have the following
 ```json
 {
   "iss": "https://accounts.google.com",
-  "azp": "<GOOGLE_CLIENT_ID>",
-  "aud": "<GOOGLE_CLIENT_ID>",
+  "azp": "<YOUR_GOOGLE_CLIENT_ID>",
+  "aud": "<YOUR_GOOGLE_CLIENT_ID>",
   "sub": "<GOOGLE_SUB>",
   "email": "<USER_EMAIL>",
   "email_verified": true,
@@ -1478,7 +1478,8 @@ def google_callback(
     if state != google_state:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=fInvalid state (received query state={state!r}, cookie state={google_state!r}). Mae sure you are using the same host (localhost vs 127.0.0.1) as GOOGLE_REDIRECT_URI.",
+            detail=f"Invalid state (received query state={state!r}, cookie state={google_state!r}). 
+            #Mae sure you are using the same host (localhost vs 127.0.0.1) as GOOGLE_REDIRECT_URI.",
         )
     if not code:
         raise HTTPException(
@@ -1611,3 +1612,523 @@ def google_callback(
     # 6. Done
     return res
 ```
+
+---
+
+## CI - Continuous Integration, CD - Continuous Deployment
+
+CI should eventually be able to catch things like:
+
+```
+Wrong password → 401
+Inactive user → rejected
+Expired JWT → rejected
+Invalid JWT → rejected
+Revoked refresh token → rejected
+Expired session → rejected
+Logout → session unusable
+OAuth state mismatch → rejected
+Duplicate username/email → 409
+```
+
+Automation tests
+
+```
+pip install pytest
+```
+
+pytest → FastAPI app → HTTP request → response assertion
+
+Create a file called test_health.py
+```python
+from fastapi.testclient import TestClient
+from app.main import app
+  
+def test_health_check():
+    client = TestClient(app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "Healthy"}
+```
+
+
+```cmd
+(pyenv) D:\Learning\Python\networking\Authentication-methods-in-django\Auth-playground>python -m pytest
+========================================= test session starts ==========================================
+platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0
+rootdir: D:\Learning\Python\networking\Authentication-methods-in-django\Auth-playground
+plugins: anyio-4.8.0
+collected 1 item                                                                                        
+
+tests\test_health.py .                                                                            [100%] 
+
+========================================== 1 passed in 1.16s =========================================== 
+```
+
+> ```python -m pytest```  is the cmd used to run the pytest
+
+ The **`assert`** keyword is a sanity check that tests if a condition evaluates to `True`.
+### How it works:
+- **If `True`**: Execution continues to the next line normally.
+- **If `False`**: Python immediately raises an **`AssertionError`** and halts that block.
+
+auth_methods_test -> DB for pytest, all testing entries will be inserted in this db.
+
+To use test-db, following flow will be used
+
+```
+pytest starts
+   ↓
+set DATABASE_URL → auth_methods_test
+   ↓
+import application
+   ↓
+database.py reads DATABASE_URL
+   ↓
+create_engine(test database)
+   ↓
+tests run
+```
+
+Created a new env for test
+
+```env
+JWT_SECRET_KEY=<YOUR_JWT_SECRET_KEY>
+GOOGLE_CLIENT_ID=<YOUR_GOOGLE_CLIENT_ID>
+GOOGLE_CLIENT_SECRET=<YOUR_GOOGLE_CLIENT_SECRET>
+GOOGLE_REDIRECT_URI=http://localhost:8000/oauth/google/callback
+DATABASE_URL=postgresql+psycopg://postgres:<PASSWORD>@localhost:5432/auth_methods_test
+```
+
+env.py -> to use db from settings.py, cause alembic connects to the db which mentioned in alembic.ini
+```python
+from settings import DATABASE_URL
+config = context.config
+if DATABASE_URL:
+    config.set_main_option("sqlalchemy.url", DATABASE_URL)
+
+```
+
+
+### Database Schema & Multi-Tenant Model Architecture
+
+The application is built as a **multi-tenant authentication provider** where external client applications register under the `applications` table and manage users, sessions, tokens, and OAuth accounts scoped to their `app_id`.
+
+```mermaid
+erDiagram
+    APPLICATION ||--o{ USER : "owns"
+    APPLICATION ||--o{ SESSION : "owns"
+    APPLICATION ||--o{ REFRESH_TOKEN : "owns"
+    APPLICATION ||--o{ OAUTH_ACCOUNT : "owns"
+    USER ||--o{ SESSION : "has"
+    USER ||--o{ REFRESH_TOKEN : "has"
+    USER ||--o{ OAUTH_ACCOUNT : "links"
+
+    APPLICATION {
+        int id PK
+        string app_name
+        string api_key_hash UK
+        datetime created_at
+    }
+    USER {
+        int id PK
+        int app_id FK
+        string username UK
+        string password_hash
+        string email UK
+        boolean is_active
+        datetime created_at
+    }
+    SESSION {
+        int id PK
+        string session_id_hash UK
+        int user_id FK
+        int app_id FK
+        datetime created_at
+        datetime expires_at
+    }
+    REFRESH_TOKEN {
+        int id PK
+        string refresh_token_hash UK
+        int user_id FK
+        int app_id FK
+        string family_id
+        boolean revoked
+        datetime created_at
+        datetime expires_at
+    }
+    OAUTH_ACCOUNT {
+        int id PK
+        int user_id FK
+        int app_id FK
+        string provider
+        string provider_user_id UK
+        datetime created_at
+        datetime updated_at
+    }
+```
+
+#### Why Cascades & Relationships Matter
+- **`cascade="all, delete-orphan"`**: When an `Application` is deleted, all users, sessions, refresh tokens, and OAuth links belonging to that application are automatically purged by PostgreSQL.
+- **`ondelete="CASCADE"`**: Database-level foreign key constraint ensuring referential integrity if rows are deleted directly via SQL.
+- **`UniqueConstraint("provider", "provider_user_id")`**: Ensures an external Google account cannot be linked to more than one user within the same provider context.
+
+---
+
+## Centralized Universal Logout
+
+### The Problem with Logging Out in JWT + Session Architectures
+
+In traditional session-based systems, logout is simple: delete the session row from the `sessions` table.
+However, **JWT access tokens are stateless**: once a signed JWT is issued with an expiration of 20 or 60 minutes, the server validates its cryptographic signature without querying the database on every request. Deleting cookies on the client does NOT revoke the access token if an attacker or client still holds the Bearer token!
+
+### The Solution: 3-Pillar Invalidation
+
+```mermaid
+flowchart TD
+    Client["Client POST /logout {'username': '...'}"] --> Endpoint["Centralized Logout Endpoint"]
+    Endpoint --> S1["1. Delete all DB rows in `sessions` table"]
+    Endpoint --> S2["2. Delete all DB rows in `refresh_tokens` table"]
+    Endpoint --> S3["3. Increment in-memory `USER_TOKEN_VERSIONS[user.id]`"]
+    Endpoint --> S4["4. Set Set-Cookie headers to expire all client cookies"]
+
+    S1 --> ProfileCheck{"Old Session tries GET /profile"}
+    ProfileCheck -->|Session ID not in DB| 401A["401 Invalid session"]
+
+    S2 --> RefreshCheck{"Old Refresh Token tries POST /jwt-refresh"}
+    RefreshCheck -->|Hash not in DB| 401B["401 Invalid refresh token"]
+
+    S3 --> JWTCheck{"Old Access Token tries GET /jwt-profile"}
+    JWTCheck -->|Token version mismatch| 401C["401 Token revoked"]
+```
+
+#### Implementation Code
+
+```python
+# In-memory dictionary tracking user token versions for immediate revocation
+USER_TOKEN_VERSIONS: dict[int, int] = {}
+
+class LogoutRequest(BaseModel):
+    username: str
+
+@app.post("/logout")
+def logout(payload: LogoutRequest, response: Response, db: DbSession = Depends(get_db)):
+    user = db.query(UserDatabase).filter(UserDatabase.username == payload.username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # 1. Purge all DB sessions
+    db.query(Session).filter(Session.user_id == user.id).delete()
+
+    # 2. Purge all DB refresh tokens
+    db.query(RefreshToken).filter(RefreshToken.user_id == user.id).delete()
+
+    # 3. Bump token_version (invalidates all existing access tokens immediately)
+    USER_TOKEN_VERSIONS[user.id] = USER_TOKEN_VERSIONS.get(user.id, 1) + 1
+
+    db.commit()
+
+    # 4. Wipe client-side cookies
+    response.delete_cookie("session_id", path="/")
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+
+    return {"message": f"User {user.username} logged out successfully. All sessions and tokens have been invalidated."}
+```
+
+#### How Access Tokens Verify Revocation
+
+Inside `get_current_user_jwt`:
+
+```python
+expected_version = USER_TOKEN_VERSIONS.get(user.id, 1)
+if payload.get("token_version") != expected_version:
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Token has been revoked. Please login again.",
+    )
+```
+
+- When issued, a token receives `"token_version": 1`.
+- When user logs out, `USER_TOKEN_VERSIONS[user.id]` becomes `2`.
+- Any subsequent request holding the old token fails immediately with `401 Unauthorized`.
+- When the user logs in again, they receive a fresh token with `"token_version": 2`, which works normally.
+
+---
+
+## Automated Testing Suite (Pytest)
+
+### How Pytest Runs Tests Without the Application Running
+
+A common misconception is that you need to start the web server (e.g. `uvicorn app.main:app --reload`) before running `pytest`. **You do NOT need the application running.**
+
+#### 1. In-Memory ASGI Invocation vs. Network HTTP Calls
+
+```mermaid
+flowchart LR
+    subgraph Traditional Browser / Postman
+        Browser["Browser / Postman"] -->|Real TCP Socket<br>http://localhost:8000| Uvicorn["Uvicorn Web Server<br>(Network Listener)"]
+        Uvicorn -->|ASGI Interface| App1["FastAPI Application"]
+    end
+
+    subgraph Pytest In-Memory Execution
+        Test["Pytest Test Function"] -->|Direct Python Call| TestClient["fastapi.testclient.TestClient<br>(based on httpx)"]
+        TestClient -->|Direct ASGI in-memory pass| App2["FastAPI Application<br>(app.main.app)"]
+    end
+```
+
+#### 2. How `TestClient` Works Under the Hood
+FastAPI's `TestClient` inherits from Starlette and wraps `httpx`. When you do:
+```python
+from fastapi.testclient import TestClient
+from app.main import app
+
+client = TestClient(app)
+response = client.get("/health")
+```
+1. `TestClient` imports the ASGI `app` callable directly into memory inside the **same Python process**.
+2. When `client.get(...)` is called, it constructs the ASGI request `scope`, `receive`, and `send` dictionaries internally and invokes `app(scope, receive, send)` as a direct function call.
+3. **No network sockets are opened**, no ports (like `8000`) are bound, and no HTTP packets travel over the loopback interface (`127.0.0.1`).
+4. This results in **ultra-fast execution** (hundreds of requests per second) and completely eliminates port-binding conflicts (`Address already in use`).
+
+#### 3. What DOES Need to Be Running?
+- **The Database (PostgreSQL)**: While the web server is in-memory, the database queries (`SQLAlchemy` $\rightarrow$ `psycopg`) are real! Your database (`auth_methods_test`) must be running and accepting connections.
+- **In CI/CD (GitHub Actions)**: This is why [.github/workflows/ci.yml](file:///d:/Learning/Python/networking/Auth-playground/.github/workflows/ci.yml) spins up a `postgres:15` service container, but runs `pytest -v` directly without starting Uvicorn!
+
+---
+
+### Architecture of the Test Suite
+
+```
+tests/
+├── __init__.py            # Makes tests an importable Python package
+├── conftest.py            # Global Pytest fixtures (DB creation, TestClient)
+├── utils.py               # Helper generator for unique, isolated test identities
+├── test_health.py         # Basic smoke check (/health)
+├── test_basic_auth.py     # HTTP Basic auth & /basic-auth service tests
+├── test_session.py        # Cookie sessions, /login, /profile, /logout tests
+├── test_jwt.py            # JWT tokens, refresh rotation, reuse detection, /logout tests
+└── test_oauth.py          # Google OAuth URLs, token exchange, and callback tests
+```
+
+### Pytest Configuration (`pytest.ini`)
+
+```ini
+[pytest]
+pythonpath = .
+testpaths = tests
+```
+- **`pythonpath = .`**: Automatically adds the project root to `sys.path` so root modules (`database`, `models`, `settings`, `app`) can be imported without import errors.
+- **`testpaths = tests`**: Restricts test collection strictly to the `tests/` directory.
+
+### Key Fixtures & Test Isolation (`conftest.py` & `utils.py`)
+
+```python
+# tests/conftest.py
+import sys
+from pathlib import Path
+
+# Ensures project root is on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+from fastapi.testclient import TestClient
+from database import engine, Base, SessionLocal
+from app.main import app
+
+@pytest.fixture(scope="session", autouse=True)
+def setup_database():
+    """Ensure database schema is created before tests run."""
+    Base.metadata.create_all(bind=engine)
+    yield
+
+@pytest.fixture
+def client():
+    """Provides a fresh in-memory FastAPI test client."""
+    with TestClient(app) as test_client:
+        yield test_client
+```
+
+```python
+# tests/utils.py
+import uuid
+
+def unique_string(prefix: str = "test") -> str:
+    """Generates unique IDs (e.g. 'basic_user_a1b2c3d4') so repeated test runs never collide in the DB."""
+    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+```
+
+### The 15 Core Automated Test Tasks
+
+| Test File | Test Function | Purpose / Scenarios Covered |
+| :--- | :--- | :--- |
+| **`test_health.py`** | `test_health_check` | Validates API liveness (`GET /health` returns `200` with `{"status": "Healthy"}`). |
+| **`test_basic_auth.py`** | `test_basic_auth_service_registration_and_login` | Tests new user registration (`status: "registered"`) and repeat login (`status: "verified"`). |
+| | `test_basic_auth_service_invalid_password` | Verifies wrong password triggers `401 Unauthorized ("Invalid credentials")`. |
+| | `test_http_basic_auth_route` | Verifies standard HTTP Basic Auth header (`Authorization: Basic base64(u:p)`) on `GET /test`. |
+| **`test_session.py`** | `test_session_auth_service` | Tests session creation, `session_id` cookie header issuance, and accessing `GET /profile`. |
+| | `test_session_login_and_centralized_logout_flow` | Verifies full session lifecycle: login $\rightarrow$ access profile $\rightarrow$ logout $\rightarrow$ confirm old cookie fails with `401 Invalid session`. |
+| | `test_session_invalid_login` | Rejects non-existent users on `POST /login` with `401`. |
+| | `test_profile_unauthorized_without_cookie` | Rejects unauthenticated requests to `GET /profile` with `401 Session not found`. |
+| **`test_jwt.py`** | `test_jwt_auth_service_and_profile` | Tests `POST /jwt-auth` issuing access and refresh tokens, and validates `GET /jwt-profile` with `Bearer <token>`. |
+| | `test_jwt_login_success_and_failure` | Tests standard username/password login via `POST /jwt-login` and wrong password rejection. |
+| | `test_jwt_refresh_token_rotation_and_reuse_detection` | Tests Refresh Token Rotation (RTR). Re-using an already rotated token triggers **reuse detection**, revoking the entire token family. |
+| | `test_jwt_centralized_logout_invalidates_tokens` | Tests centralized logout: immediately revokes access tokens, deletes refresh tokens, and verifies re-login mints new working tokens. |
+| **`test_oauth.py`** | `test_oauth_service_google_login_url_generation` | Tests Google OAuth URL generation with state/nonce parameters and CSRF cookies. |
+| | `test_oauth_service_direct_login_post` | Tests backend-to-backend OAuth link provisioning via `POST /oauth-service/google/login`. |
+| | `test_oauth_service_callback_flow` | Mocks Google token exchange and ID token verification, verifying account link and token generation without external network calls. |
+
+---
+
+## Explanation of All Imported Modules and Parameters
+
+Below is a detailed guide to every external and internal module, class, and parameter used in this codebase:
+
+### 1. Standard Library Modules
+
+| Module / Function | Purpose in Auth Playground |
+| :--- | :--- |
+| **`datetime`, `timedelta`, `timezone`** | Handles UTC timestamp calculations for token issue dates (`iat`), token expiration (`exp`), and session lifetimes (`expires_at = now + timedelta(days=7)`). |
+| **`hashlib`** | Cryptographic hashing utility: SHA-256 (`hashlib.sha256(...)`) is used to hash session IDs, refresh tokens, and application API keys before saving to PostgreSQL. |
+| **`secrets`** | Cryptographically secure random number generator: `secrets.token_urlsafe(32)` is used to generate session IDs, refresh tokens, OAuth state CSRF tokens, and nonces. |
+| **`urllib.parse`** | URL encoding tool: `urllib.parse.urlencode(...)` builds query parameter strings for the Google OAuth 2.0 authorization URL. |
+| **`urllib.request`, `urllib.error`** | Performs HTTP POST requests to Google's Token Endpoint (`https://oauth2.googleapis.com/token`) to exchange the authorization code for tokens. |
+| **`json`** | Decodes JSON payloads returned by Google's token endpoint into Python dictionaries. |
+
+### 2. FastAPI & Web Framework Modules
+
+| Class / Parameter | Purpose / Usage |
+| :--- | :--- |
+| **`FastAPI`** | Core ASGI framework application instance orchestrating all routes, middleware, and dependency injection. |
+| **`Depends`** | Dependency injection provider: used to inject database sessions (`db: DbSession = Depends(get_db)`) and auth extractors (`Depends(get_current_user_jwt)`). |
+| **`HTTPException`** | Standard exception class for raising HTTP errors with specific status codes (`401`, `403`, `404`, `409`) and JSON error messages (`detail="..."`). |
+| **`status`** | HTTP status code constants (`status.HTTP_401_UNAUTHORIZED`, `status.HTTP_409_CONFLICT`, etc.) avoiding magic numbers. |
+| **`Response`** | The raw HTTP response object, used to set or delete cookies (`response.set_cookie()`, `response.delete_cookie()`). |
+| **`Cookie`** | FastAPI parameter extractor that automatically extracts named cookies from incoming HTTP requests (`session_id: str \| None = Cookie(default=None)`). |
+| **`CORSMiddleware`** | Middleware enabling Cross-Origin Resource Sharing for frontends running on `localhost:3000` or `localhost:5173`. |
+| **`HTTPBasic`, `HTTPBasicCredentials`** | Extracts and parses HTTP Basic Authentication headers (`Authorization: Basic ...`) into `.username` and `.password`. |
+| **`HTTPBearer`** | Extracts Bearer tokens from the `Authorization: Bearer <token>` header. |
+| **`RedirectResponse`** | HTTP 307 redirect response used to forward the user's browser to Google's OAuth consent screen. |
+| **`JSONResponse`** | Custom HTTP response returning JSON content while setting or deleting cookies on the response headers. |
+
+### 3. Pydantic & Data Validation
+
+| Class | Purpose / Usage |
+| :--- | :--- |
+| **`BaseModel`** | Base class for defining request and response schemas, automatic JSON parsing, serialization, and OpenAPI documentation. |
+| **`EmailStr`** | Validates email syntax using `pydantic[email]`, rejecting malformed email inputs with HTTP 422 before route execution. |
+
+### 4. Database & ORM (SQLAlchemy)
+
+| Component | Purpose / Usage |
+| :--- | :--- |
+| **`create_engine`** | Establishes the database connection pool using the `DATABASE_URL`. |
+| **`sessionmaker`** | Factory for creating scoped database sessions (`SessionLocal`). |
+| **`declarative_base`** | Base class from which all database models (`UserDatabase`, `Session`, etc.) inherit table metadata. |
+| **`DbSession` (`sqlalchemy.orm.Session`)** | The active database transaction session used to query, add, commit, or rollback changes. |
+| **`IntegrityError`** | Exception raised on unique constraint violations (e.g., duplicate username or duplicate email), triggering a safe transaction rollback (`db.rollback()`). |
+
+### 5. Authentication & OAuth Libraries
+
+| Component | Purpose / Usage |
+| :--- | :--- |
+| **`jwt` (`PyJWT`)** | Encodes (`jwt.encode`) and decodes (`jwt.decode`) JSON Web Tokens with HS256 signatures, checking required claims (`sub`, `iat`, `exp`). |
+| **`google.oauth2.id_token`** | Validates Google OpenID Connect ID tokens (`verify_oauth2_token`), checking signature against Google's public certificates, verifying client ID audience (`aud`), issuer (`iss`), and expiration. |
+| **`google.auth.transport.requests.Request`** | HTTP transport adapter utilized by Google's token verification library to fetch Google's public keys. |
+| **`passlib` / `hash_password`, `verify_password`** | One-way hashing algorithm (bcrypt / argon2 / PBKDF2) ensuring raw passwords are never saved in plaintext. |
+
+---
+
+## Continuous Integration & Continuous Deployment (CI/CD)
+
+The repository includes a ready-to-deploy **GitHub Actions** CI/CD pipeline in [`.github/workflows/ci.yml`](file:///d:/Learning/Python/networking/Auth-playground/.github/workflows/ci.yml).
+
+### How the CI/CD Pipeline Operates
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Dev as Developer
+    participant Git as GitHub Actions Runner
+    participant PG as PostgreSQL Service Container (Docker)
+    participant Py as Pytest Test Runner
+
+    Dev->>Git: git push / pull_request (main/master)
+    Git->>PG: Spin up postgres:15 container (auth_methods_test on port 5432)
+    PG-->>Git: Health check passed (pg_isready)
+    Git->>Git: Checkout repo & Set up Python 3.11 (with pip cache)
+    Git->>Git: pip install -r requirements.txt
+    Git->>Py: Run `pytest -v`
+    Py->>PG: Base.metadata.create_all(bind=engine)
+    Py->>Py: Execute 15 test tasks across all auth modules
+    Py-->>Git: All 15 tests PASSED (0 failures)
+    Git-->>Dev: Green Checkmark / Ready to deploy!
+```
+
+### GitHub Actions Workflow File Breakdown
+
+```yaml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: auth_methods_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      JWT_SECRET_KEY: ci_cd_test_jwt_secret_key_123456789
+      GOOGLE_CLIENT_ID: mock_google_client_id
+      GOOGLE_CLIENT_SECRET: mock_google_client_secret
+      GOOGLE_REDIRECT_URI: http://localhost:8000/oauth/google/callback
+      DATABASE_URL: postgresql+psycopg://postgres:root@localhost:5432/auth_methods_test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Pytest Suite
+        run: |
+          pytest -v
+```
+
+### Steps to Push & Run in GitHub Actions
+
+1. Commit and push your code to GitHub:
+   ```bash
+   git add .
+   git commit -m "Complete multi-tenant auth service with centralized logout, tests, and CI/CD"
+   git push origin main
+   ```
+2. Navigate to your repository's **Actions** tab on GitHub.
+3. The **CI/CD Pipeline** will trigger automatically, start the PostgreSQL container, install dependencies, and run all 15 tests.
