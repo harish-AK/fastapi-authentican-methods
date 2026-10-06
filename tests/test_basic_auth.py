@@ -5,34 +5,34 @@ def test_basic_auth_service_registration_and_login(client):
     username = unique_string("basic_user")
     email = f"{username}@example.com"
     password = "secretpassword123"
-    app_id = 101
+    app_name = "BasicApp"
 
-    # 1. Register a new user via basic-auth service
+    # 1. Register a new user via basic auth endpoint
     register_res = client.post(
-        "/basic-auth",
+        "/basic",
         json={
-            "app_id": app_id,
             "username": username,
             "password": password,
             "email": email,
-            "app_name": "Test Application",
+            "app_name": app_name,
         },
     )
     assert register_res.status_code == 200
     data = register_res.json()
     assert data["status"] == "registered"
+    assert data["auth_type"] == "basic"
     assert data["username"] == username
     assert data["email"] == email
-    assert data["app_id"] == app_id
+    assert data["app_name"] == app_name
     assert "user_id" in data
 
-    # 2. Existing user logs in with the same credentials
+    # 2. Existing user logs in / verifies with the same credentials
     login_res = client.post(
-        "/basic-auth",
+        "/basic",
         json={
-            "app_id": app_id,
             "username": username,
             "password": password,
+            "app_name": app_name,
         },
     )
     assert login_res.status_code == 200
@@ -41,64 +41,48 @@ def test_basic_auth_service_registration_and_login(client):
     assert login_data["username"] == username
 
 
+def test_basic_auth_via_unified_auth_endpoint(client):
+    username = unique_string("unified_basic")
+    password = "unified_password"
+    app_name = "UnifiedApp"
+
+    # Calling master POST /auth with auth_type="basic"
+    res = client.post(
+        "/auth",
+        json={
+            "username": username,
+            "password": password,
+            "app_name": app_name,
+            "auth_type": "basic",
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["auth_type"] == "basic"
+    assert res.json()["status"] == "registered"
+
+
 def test_basic_auth_service_invalid_password(client):
     username = unique_string("basic_badpw")
-    email = f"{username}@example.com"
-    app_id = 102
+    app_name = "BadPwApp"
 
     # Register
     client.post(
-        "/basic-auth",
+        "/basic",
         json={
-            "app_id": app_id,
             "username": username,
             "password": "correct_password",
-            "email": email,
+            "app_name": app_name,
         },
     )
 
     # Attempt login with wrong password
     bad_res = client.post(
-        "/basic-auth",
+        "/basic",
         json={
-            "app_id": app_id,
             "username": username,
             "password": "wrong_password",
+            "app_name": app_name,
         },
     )
     assert bad_res.status_code == 401
     assert "Invalid credentials" in bad_res.json()["detail"]
-
-
-def test_http_basic_auth_route(client):
-    username = unique_string("http_basic_user")
-    email = f"{username}@example.com"
-    password = "http_secret_password"
-
-    # Create user first via basic-auth service
-    create_res = client.post(
-        "/basic-auth",
-        json={
-            "app_id": 103,
-            "username": username,
-            "password": password,
-            "email": email,
-        },
-    )
-    assert create_res.status_code == 200
-
-    # 1. Access GET /test with valid HTTP Basic Auth
-    res = client.get("/test", auth=(username, password))
-    assert res.status_code == 200
-    assert res.json() == {
-        "username": username,
-        "message": "Successfully authenticated!",
-    }
-
-    # 2. Access GET /test with wrong password
-    bad_res = client.get("/test", auth=(username, "bad_password"))
-    assert bad_res.status_code == 401
-
-    # 3. Access GET /test without credentials
-    no_auth_res = client.get("/test")
-    assert no_auth_res.status_code == 401

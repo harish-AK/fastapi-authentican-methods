@@ -3,99 +3,114 @@ from tests.utils import unique_string
 
 def test_session_auth_service(client):
     username = unique_string("session_svc")
-    email = f"{username}@example.com"
     password = "session_secret_pw"
-    app_id = 201
+    app_name = "SessionApp"
 
-    # 1. Register & authenticate through session-auth service
+    # 1. Register & authenticate through session endpoint
     res = client.post(
-        "/session-auth",
+        "/session",
         json={
-            "app_id": app_id,
             "username": username,
             "password": password,
-            "email": email,
-            "app_name": "Session App",
+            "app_name": app_name,
         },
     )
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "registered"
+    assert data["auth_type"] == "session"
     assert data["username"] == username
     assert "session_id" in data
     assert "session_id" in res.cookies
 
-    # 2. Access protected profile using the session cookie
+    # 2. Access /verify introspection endpoint using the session cookie
     client.cookies.set("session_id", data["session_id"])
-    profile_res = client.get("/profile")
-    assert profile_res.status_code == 200
-    profile_data = profile_res.json()
-    assert profile_data["username"] == username
-    assert profile_data["email"] == email
+    verify_res = client.get("/verify")
+    assert verify_res.status_code == 200
+    verify_data = verify_res.json()
+    assert verify_data["valid"] is True
+    assert verify_data["username"] == username
+    assert verify_data["auth_type"] == "session"
+
+
+def test_session_via_unified_auth_endpoint(client):
+    username = unique_string("unified_session")
+    password = "session_pwd"
+    app_name = "UnifiedApp"
+
+    # Call master POST /auth with auth_type="session"
+    res = client.post(
+        "/auth",
+        json={
+            "username": username,
+            "password": password,
+            "app_name": app_name,
+            "auth_type": "session",
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["auth_type"] == "session"
+    assert "session_id" in res.json()
 
 
 def test_session_login_and_centralized_logout_flow(client):
     username = unique_string("session_user")
-    email = f"{username}@example.com"
     password = "user_secret_123"
-    app_id = 202
+    app_name = "SessionLogoutApp"
 
-    # 1. Create user
-    client.post(
-        "/session-auth",
-        json={
-            "app_id": app_id,
-            "username": username,
-            "password": password,
-            "email": email,
-        },
-    )
-
-    # 2. Log in using /login
-    login_res = client.post(
-        "/login",
+    # 1. Authenticate / create session
+    res = client.post(
+        "/session",
         json={
             "username": username,
             "password": password,
+            "app_name": app_name,
         },
     )
-    assert login_res.status_code == 200
-    assert "session_id" in login_res.cookies
-    session_id = login_res.cookies["session_id"]
+    assert res.status_code == 200
+    session_id = res.json()["session_id"]
 
-    # 3. Access protected profile with the session cookie
+    # 2. Verify active session works
     client.cookies.set("session_id", session_id)
-    profile_res = client.get("/profile")
-    assert profile_res.status_code == 200
-    assert profile_res.json()["username"] == username
+    verify_res = client.get("/verify")
+    assert verify_res.status_code == 200
+    assert verify_res.json()["username"] == username
 
-    # 4. Centralized logout calling /logout with username
+    # 3. Centralized logout calling /logout with username
     logout_res = client.post(
         "/logout",
-        json={"username": username},
+        json={"username": username, "app_name": app_name},
     )
     assert logout_res.status_code == 200
     assert "logged out successfully" in logout_res.json()["message"]
 
-    # 5. Accessing protected profile with old session cookie must now fail
+    # 4. Accessing /verify with old session cookie must now fail
     client.cookies.set("session_id", session_id)
-    denied_res = client.get("/profile")
+    denied_res = client.get("/verify")
     assert denied_res.status_code == 401
-    assert denied_res.json()["detail"] == "Invalid session"
 
 
-def test_session_invalid_login(client):
-    res = client.post(
-        "/login",
+def test_session_invalid_password(client):
+    username = unique_string("session_bad_pw")
+    app_name = "SessionBadApp"
+
+    # Register
+    client.post(
+        "/session",
         json={
-            "username": "non_existent_user_999",
-            "password": "wrong_password",
+            "username": username,
+            "password": "correct_password",
+            "app_name": app_name,
         },
     )
-    assert res.status_code == 401
 
-
-def test_profile_unauthorized_without_cookie(client):
-    res = client.get("/profile")
-    assert res.status_code == 401
-    assert res.json()["detail"] == "Session not found"
+    # Attempt with wrong password
+    bad_res = client.post(
+        "/session",
+        json={
+            "username": username,
+            "password": "wrong_password",
+            "app_name": app_name,
+        },
+    )
+    assert bad_res.status_code == 401

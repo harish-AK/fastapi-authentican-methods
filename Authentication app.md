@@ -1958,25 +1958,26 @@ def unique_string(prefix: str = "test") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 ```
 
-### The 15 Core Automated Test Tasks
+### The Core Automated Test Tasks
 
 | Test File | Test Function | Purpose / Scenarios Covered |
 | :--- | :--- | :--- |
 | **`test_health.py`** | `test_health_check` | Validates API liveness (`GET /health` returns `200` with `{"status": "Healthy"}`). |
-| **`test_basic_auth.py`** | `test_basic_auth_service_registration_and_login` | Tests new user registration (`status: "registered"`) and repeat login (`status: "verified"`). |
+| **`test_basic_auth.py`** | `test_basic_auth_service_registration_and_login` | Tests registration via `POST /basic` (`status: "registered"`) and repeat login (`status: "verified"`). |
+| | `test_basic_auth_via_unified_auth_endpoint` | Tests master endpoint `POST /auth` with `auth_type="basic"`. |
 | | `test_basic_auth_service_invalid_password` | Verifies wrong password triggers `401 Unauthorized ("Invalid credentials")`. |
-| | `test_http_basic_auth_route` | Verifies standard HTTP Basic Auth header (`Authorization: Basic base64(u:p)`) on `GET /test`. |
-| **`test_session.py`** | `test_session_auth_service` | Tests session creation, `session_id` cookie header issuance, and accessing `GET /profile`. |
-| | `test_session_login_and_centralized_logout_flow` | Verifies full session lifecycle: login $\rightarrow$ access profile $\rightarrow$ logout $\rightarrow$ confirm old cookie fails with `401 Invalid session`. |
-| | `test_session_invalid_login` | Rejects non-existent users on `POST /login` with `401`. |
-| | `test_profile_unauthorized_without_cookie` | Rejects unauthenticated requests to `GET /profile` with `401 Session not found`. |
-| **`test_jwt.py`** | `test_jwt_auth_service_and_profile` | Tests `POST /jwt-auth` issuing access and refresh tokens, and validates `GET /jwt-profile` with `Bearer <token>`. |
-| | `test_jwt_login_success_and_failure` | Tests standard username/password login via `POST /jwt-login` and wrong password rejection. |
-| | `test_jwt_refresh_token_rotation_and_reuse_detection` | Tests Refresh Token Rotation (RTR). Re-using an already rotated token triggers **reuse detection**, revoking the entire token family. |
-| | `test_jwt_centralized_logout_invalidates_tokens` | Tests centralized logout: immediately revokes access tokens, deletes refresh tokens, and verifies re-login mints new working tokens. |
-| **`test_oauth.py`** | `test_oauth_service_google_login_url_generation` | Tests Google OAuth URL generation with state/nonce parameters and CSRF cookies. |
-| | `test_oauth_service_direct_login_post` | Tests backend-to-backend OAuth link provisioning via `POST /oauth-service/google/login`. |
-| | `test_oauth_service_callback_flow` | Mocks Google token exchange and ID token verification, verifying account link and token generation without external network calls. |
+| **`test_session.py`** | `test_session_auth_service` | Tests session creation via `POST /session`, cookie setting, and introspection on `GET /verify`. |
+| | `test_session_via_unified_auth_endpoint` | Tests master endpoint `POST /auth` with `auth_type="session"`. |
+| | `test_session_login_and_centralized_logout_flow` | Tests session lifecycle: create session $\rightarrow$ verify $\rightarrow$ `POST /logout` $\rightarrow$ assert `GET /verify` fails with `401`. |
+| | `test_session_invalid_password` | Rejects incorrect password with `401`. |
+| **`test_jwt.py`** | `test_jwt_auth_service_and_verification` | Tests `POST /jwt` issuing access and refresh tokens, and validates introspection on `GET /verify`. |
+| | `test_jwt_via_unified_auth_endpoint` | Tests master endpoint `POST /auth` with `auth_type="jwt"`. |
+| | `test_jwt_invalid_password` | Rejects incorrect password with `401`. |
+| | `test_jwt_refresh_token_rotation_and_reuse_detection` | Tests Refresh Token Rotation via `POST /jwt/refresh`. Re-using an already rotated token triggers reuse detection. |
+| | `test_jwt_centralized_logout_invalidates_tokens` | Tests centralized logout: revokes access tokens, deletes refresh tokens, and asserts old token fails on `GET /verify`. |
+| **`test_oauth.py`** | `test_oauth_service_direct_login` | Tests OAuth provisioning via `POST /oauth` with `email` and `app_name`, and verifies token on `GET /verify`. |
+| | `test_oauth_via_unified_auth_endpoint` | Tests master endpoint `POST /auth` with `auth_type="oauth"`. |
+| | `test_oauth_missing_email` | Validates that calling `/oauth` without email returns `400 Bad Request`. |
 
 ---
 
