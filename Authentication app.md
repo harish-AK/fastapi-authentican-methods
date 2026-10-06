@@ -1,48 +1,98 @@
+# Centralized Authentication Service: Complete Architecture & Guide
 
-Refer Authentication - [[Authentication]]
+A comprehensive, production-grade guide to building a centralized multi-tenant authentication microservice using **FastAPI**, **PostgreSQL**, **SQLAlchemy**, **Alembic**, and **Pytest**.
+
+---
+
+## Table of Contents
+1. [Project Overview & Directory Structure](#1-project-overview--directory-structure)
+2. [Configuration & Database Connection](#2-configuration--database-connection)
+3. [Database Models & Multi-Tenant Architecture](#3-database-models--multi-tenant-architecture)
+4. [Database Migrations with Alembic](#4-database-migrations-with-alembic)
+5. [Password Hashing & Security](#5-password-hashing--security)
+6. [Core Authentication Methods](#6-core-authentication-methods)
+   - [Method 1: Basic Authentication](#method-1-basic-authentication)
+   - [Method 2: Stateful Session Authentication](#method-2-stateful-session-authentication)
+   - [Method 3: Stateless JWT & Refresh Tokens](#method-3-stateless-jwt--refresh-tokens)
+   - [Method 4: OAuth 2.0 & OpenID Connect (Google)](#method-4-oauth-20--openid-connect-google)
+7. [Centralized Universal Logout](#7-centralized-universal-logout)
+8. [Introspection Endpoint (`GET /verify`)](#8-introspection-endpoint-get-verify)
+9. [Master Unified Route (`POST /auth`)](#9-master-unified-route-post-auth)
+10. [Automated Testing with Pytest (In-Memory Execution)](#10-automated-testing-with-pytest-in-memory-execution)
+11. [CI/CD Pipeline with GitHub Actions](#11-cicd-pipeline-with-github-actions)
+12. [Comprehensive Parameter & Module Glossary](#12-comprehensive-parameter--module-glossary)
+
+---
+
+## 1. Project Overview & Directory Structure
 
 ```
-auth-playground/
-│
+Auth-playground/
 ├── app/
 │   ├── __init__.py
-│   └── main.py
-│
+│   ├── main.py              # Streamlined FastAPI endpoints & business logic
+│   └── security.py          # Password hashing and verification utilities
 ├── tests/
-│
-├── .env
-|-- database.py
-|-- settings.py
-├── .gitignore
-├── requirements.txt
-└── README.md
+│   ├── __init__.py          # Marks tests as a Python package
+│   ├── conftest.py          # Global Pytest fixtures (DB creation, TestClient)
+│   ├── utils.py             # Unique string generator for isolated tests
+│   ├── test_health.py       # API liveness check
+│   ├── test_basic_auth.py   # Basic auth endpoint tests
+│   ├── test_session.py      # Session auth & cookie tests
+│   ├── test_jwt.py          # JWT, refresh rotation, & revocation tests
+│   └── test_oauth.py        # OAuth provisioning tests
+├── alembic/                 # Alembic migration scripts and versions
+├── .github/workflows/
+│   └── ci.yml               # GitHub Actions automated CI/CD pipeline
+├── .env                     # Local environment variables (gitignored)
+├── .env.test                # Test environment variables (gitignored)
+├── .gitignore               # Ignored files (.env, __pycache__, etc.)
+├── alembic.ini              # Alembic migration configuration
+├── database.py              # Database engine & sessionmaker
+├── models.py                # SQLAlchemy table models
+├── pytest.ini               # Pytest configuration (pythonpath, testpaths)
+├── requirements.txt         # Pinned project dependencies
+├── settings.py              # Application settings & environment loader
+└── Authentication app.md    # Master documentation
 ```
 
->settings.py
+---
 
-```
-settings.py 
-	→ application configuration 
-	→ JWT secret 
-	→ token expiry 
-	→ database URL 
-	→ environment-specific settings
+## 2. Configuration & Database Connection
+
+### Settings (`settings.py`)
+Loads environment variables from `.env` (or `.env.test`) using `python-dotenv`:
+
+```python
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env.test", override=True)
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+ORIGINS = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8000"]
 ```
 
-database.py -> to make postgres connection
+### Database Connection (`database.py`)
+Establishes connection pooling and scoped session management:
+
 ```python
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from settings import DATABASE_URL
 
-DATABASE_URL = "postgresql+psycopg://postgres:YOUR_PASSWORD@localhost:5432/auth_methods"
 engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
 def get_db():
+    """FastAPI dependency yielding a thread-local DB session, closing it on completion."""
     db = SessionLocal()
     try:
         yield db
@@ -50,1669 +100,15 @@ def get_db():
         db.close()
 ```
 
-User database model
-```python
-class UserDatabase(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, nullable=False,unique=True)
-    password_hash = Column(String, nullable=False)
-    email = Column(String, nullable=False,unique=True)
-    is_active = Column(Boolean, default=True,nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-```
-
-> Alembic -> for migration
-
-
-```cmd
-pip install alembic
-```
-Alembic is an python package
-
-```
-Your SQLAlchemy models
-        ↓
-      Alembic
-        ↓
-   Migration file
-        ↓
-    PostgreSQL
-```
-
-with Alembic we will have migration history like 
-```
-001_create_users_table
-002_add_unique_email
-003_add_sessions_table
-004_add_oauth_accounts
-```
-
-To initialize alembic
-```cmd
-alembic init alembic
-```
-
-This will create a folder called alembic which will have a set of files.
-
-```cmd
-├── alembic/
-│   ├── versions/
-│   ├── env.py
-│   ├── script.py.mako
-│   └── README
-```
-
-> Connect alembic to postgres
-
-```cmd
-alembic.ini
-```
-
-This cmd will open a text file, in that update,
-sqlalchemy.url = postgresql+psycopg://postgres:root@localhost/auth_methods (your postgres connection)
-will have **driver** (postgresql+psycopg) as prefix for sqlalchemy.url
-
-> Register model's metadata in alembic env.py
-
-- import the created models  (import **Base** from database.py which holds postgres connection)
-- target_metadata = Base.metadata in env.py
-so that alembic can know my UserDatabase model fields.
-
-> Run migrations (to create the table in specified connection)
-
-```c
-alembic revision --autogenerate -m "create users table"
-```
-This will create a migration file which tells us whats will be created in postgres connection (like table and its fields)
-
->[!IMPORTANT] This will not create table in potgres yet
-
-
-```c
-alembic upgrade head
-```
-This will create a table in postgres.
-
-alembic_version -> a table in the connection which will have migration histories
+#### Why `get_db` Uses `try / finally`
+- `yield db`: Injects the active session into the FastAPI endpoint route handler.
+- `finally: db.close()`: Guarantees the database connection is returned to the pool after the response is sent, even if an unhandled exception occurs.
 
 ---
 
-### Password hashing
+## 3. Database Models & Multi-Tenant Architecture
 
-```
-pip install argon2-cffi
-```
-An algo to hash password
-
-```python
-from argon2 import PasswordHasher
-password_hasher = PasswordHasher()
-  
-def hash_password(password: str) -> str:
-    """
-    Hash a password using Argon2.
-    """
-    return password_hasher.hash(password)
-
-def verify_password(password: str, password_hash: str) -> bool:
-    """
-    Verify a password against its hash.
-    """
-    return password_hasher.verify(password_hash, password)
-  
-password = "MyPassword123"
-  
-hashed = hash_password(password)
-  
-print(hashed)
-print(verify_password(password, hashed)) # True
-print(verify_password("WrongPassword", hashed)) # error cause password mismatched
-```
-
-> POST -> Create User
-
-```python
-class UserCreate(BaseModel):
-    username: st
-    email: EmailStr
-    password: str
-  
-class UserResponse(BaseModel):
-    id: int
-    username: str
-    email: str
-    is_active: bool
-    created_at: datetime
-  
-@app.post("/users", response_model=UserResponse)
-def create_user(user: UserCreate, db=Depends(get_db)):
-    try:
-        # Application-level checks for better error messages
-        if db.query(UserDatabase).filter(
-            UserDatabase.username == user.username
-        ).first():
-            raise HTTPException(
-                status_code=409,
-                detail="Username already exists"
-            )
-  
-        if db.query(UserDatabase).filter(
-            UserDatabase.email == user.email
-        ).first():
-            raise HTTPException(
-                status_code=409,
-                detail="Email already exists"
-            )
-  
-        # Hash password only after validation/checks pass
-        hashed_password = hash_password(user.password)
-  
-        new_user = UserDatabase(
-            username=user.username,
-            email=user.email,
-            password_hash=hashed_password
-        )
-  
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-  
-        return new_user
-  
-    except HTTPException:
-        # Let our intentional HTTP errors pass through unchanged
-        raise
-  
-    except IntegrityError:
-        # Database remains the final source of truth.
-        # This protects gainst race conditions between the checks above
-        # and the INSERT.
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Username or email already exists"
-        )
-  
-    except Exception:
-        # Unexpected application/database failure
-        db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to create user"
-        )
-```
-
-
----
-
-### Basic authentication
-
-```
-Request 1 → credentials → verify → allow
-Request 2 → credentials → verify → allow
-Request 3 → credentials → verify → allow
-```
-
-> A reusable authentication dependency (Depends)
-
-```
-HTTP request
-     ↓
-Basic Auth dependency
-     ↓
-username/password
-     ↓
-database
-     ↓
-Argon2 verification
-     ↓
-UserDatabase
-     ↓
-endpoint receives authenticated user
-```
-
-> HTTP Basic Auth
-
-In HTTP Basic Auth, the application expects a header that contains a username and a
-password.
-```
-1. HTTPBasic
-↓
-Extract credentials from HTTP request
-
-2. Your authentication dependency
-↓
-Find user + verify password
-
-3. Your endpoint
-↓
-Perform the actual business operation
-```
-
-```python
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-
-security = HTTPBasic()
-@app.get('/test')
-def test(credentials: HTTPBasicCredentials = Depends(security), db=Depends(get_db)):
-    user_in_db = db.query(UserDatabase).filter(
-        UserDatabase.username == credentials.username
-    ).first()
-    if not user_in_db or not verify_password(credentials.password, user_in_db.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return {"username": credentials.username, "message": "Successfully authenticated!"}
-```
-
-> Verify password using HttpBasic
-
-```python
-security = HTTPBasic()
-def get_current_user(db=Depends(get_db),credentials: HTTPBasicCredentials = Depends(security)):
-    user_in_db = db.query(UserDatabase).filter(
-        UserDatabase.username == credentials.username
-    ).first()
-    if not user_in_db or not verify_password(credentials.password, user_in_db.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return user_in_db
-  
-@app.get('/test')
-def test(current_user: UserDatabase = Depends(get_current_user)):
-    return {"username": current_user.username, "message": "Successfully authenticated!"}
-```
-
-Just like /test all endpoint will call get_current_user before every request.
-
->Final flow
-
-```
-Client
-  ↓
-username + password
-  ↓
-HTTP Basic
-  ↓
-get_current_user()
-  ↓
-database lookup
-  ↓
-Argon2 verification
-  ↓
-authenticated User
-  ↓
-protected endpoint
-```
-
-```
-HTTPBasic
- ↓ 
-HTTP layer "Extract username/password from the Authorization header" 
-	↓ 
-get_current_user() 
-  ↓ 
-Application authentication "Is this username/password actually valid?"
-```
-
->[!IMPORTANT] 
->HttpBasic will extract the username and password from header
-
----
-
-### Session based authentication
-
-```
-                LOGIN
-                  │
-          username + password
-                  │
-                  ▼
-             Authenticate
-                  │
-                  ▼
-          Create session
-                  │
-          ┌───────┴────────┐
-          │                │
-          ▼                ▼
-    Session Store       Browser
-    session_id ──→      session_id
-    user_id             ↑
-    expires_at           │
-          ▲              │
-          └──────────────┘
-```
-
-> The key idea
-
-The **browser possesses the identifier**.
-The **server possesses the authentication state**.
-That's why it's called a **server-side session**.
-
-```
-**Cookie ≠ stateful**  
-**Authorization header ≠ stateless**
-```
-
-To prevent XSS attacks, cookies are read by HTTP requests alone.
-```
-JavaScript
-    ✕
-    │
-    │ cannot read
-    ▼
-HttpOnly session cookie
-    │
-    ▼
-Browser automatically sends it
-    │
-    ▼
-FastAPI
-```
-
-`HttpOnly` = JavaScript cannot read the cookie.
-
-| Attribute  | Protects against                  |
-| ---------- | --------------------------------- |
-| `HttpOnly` | JavaScript reading the cookie     |
-| `Secure`   | Cookie being sent over plain HTTP |
-
-> CSRF (Cross-Site Request Forgery).
-
-```
-Victim logs into your app
-        ↓
-Browser has session cookie
-        ↓
-Victim visits malicious-site.com
-        ↓
-Malicious site causes a request to your-app.com
-        ↓
-Browser automatically includes your session cookie
-        ↓
-Your FastAPI app sees a valid session
-        ↓
-Request may be processed
-```
-
-with XSS -> attacker will steal the session id
-with CSRF -> attacker → trick browser into using its existing session since browser has already holds the cookie.
-
-for this CSRF issue samesite will be used
-```
-SameSite
-   ↓
-Should the browser SEND the cookie
-when the request originates from another site?
-   → Controls this
-```
-
->[!Important]
->Cookie holds the session id
-
-
-```
-             Browser
-                │
-        Cookie: session_id
-                │
-                ▼
-        ┌──────────────┐
-        │   FastAPI    │
-        └──────┬───────┘
-               │
-          session_id
-               │
-               ▼
-        ┌──────────────┐
-        │   sessions   │
-        │    table     │
-        └──────┬───────┘
-               │
-            user_id
-               │
-               ▼
-        ┌──────────────┐
-        │    users     │
-        │    table     │
-        └──────────────┘
-```
-
-> Generate session id
-
-secrets package
-
-**Token Generation**: Use `secrets.token_urlsafe()`, `secrets.token_hex()`, or `secrets.token_bytes()` to generate secure tokens for password resets, session IDs, or API keys.
-
-- Uses Python's **cryptographically secure random generator**.
-- Generates **32 random bytes**.
-- Encodes them in a URL-safe representation.
-
->[!NOTE]
->**Key distinction:** Hashing ≠ Encryption. Encryption is _reversible_ (with a key); hashing is _not_
-
-> Sessions table
-
-```python
-class Session(Base):
-    __tablename__ = "sessions"
-    id = Column(Integer, primary_key=True)
-    session_id_hash = Column(String(64), nullable=False,unique=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    expires_at = Column(DateTime(timezone=True), nullable=False)
-```
-
-make the migrations
-```c
-alembic revision --autogenerate -m "create sessions table"
-```
-
-Create table in the connection
-```c
-alembic upgrade head
-```
-
-Login API
-```python
-@app.post("/login")
-def login(
-    login_data: UserLogin,
-    response: Response,
-    db: DbSession = Depends(get_db),
-):
-    user = db.query(UserDatabase).filter(
-        UserDatabase.username == login_data.username
-    ).first()
-
-    if not user or not verify_password(login_data.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-        )
-  
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User is not active",
-        )
-  
-    session_id = create_session(user.id, db)
-  
-    response.set_cookie(
-        key="session_id",
-        value=session_id,
-        httponly=True,
-        samesite="lax",
-        secure=True,
-    )
-  
-    return {"message": "Login successful"}
-```
-
-- The below code is responsible for set the cookie in browser.
-- After login, cookie will be set in the session, so for every request we dont need to pass it, cookie will be taken automatically.  
-```python
-response.set_cookie(
-        key="session_id",
-        value=session_id,
-        httponly=True,
-        samesite="lax",
-        secure=True,
-    )
-```
-
->[!NOTE]
->Backend should validate session data
-
-For each request following steps should be followed.
-```
-session_id = "abc123"
-       ↓
-SHA-256(session_id)
-       ↓
-search sessions table
-       ↓
-does session exist?
-       ↓
-has it expired?
-       ↓
-which user does it belong to?
-       ↓
-is that user active?
-       ↓
-allow request
-```
-
->Login endpoint creates the cookie; browser stores and sends it; `Cookie()` extracts it; our server validates it.
-
----
-
->Define relationship
-
-```python
-from sqlalchemy.orm import relationship
-```
-
-In Userdatabase model
-```python
-__tablename__ = "users"
-sessions = relationship("Session", back_populates="user")
-```
-This is for mapping users table fields to session model
-
-In Session model
-```python
-__tablename__ = "sessions"
-user = relationship("UserDatabase", back_populates="sessions")
-```
-This is for mapping session table fields to users model.
-
-```
-The cookie is just the credential used to reference server-side state. It shouldn't contain business/user information.
-```
-
-Complete flow
-```
-                    SESSION AUTHENTICATION
-
-POST /login
-    │
-    ├── username/password
-    │
-    ├── verify user
-    ├── verify password
-    ├── verify active
-    │
-    ▼
-create_session(user.id)
-    │
-    ├── generate random session ID
-    ├── hash session ID
-    ├── store hash + user_id + expiration
-    │
-    ▼
-Set-Cookie: session_id=<opaque-value>
-    │
-    ▼
-Browser
-    │
-    │ automatically sends cookie
-    ▼
-GET /profile
-    │
-    ▼
-get_current_user_session()
-    │
-    ├── extract cookie
-    ├── hash it
-    ├── find session
-    ├── check expiration
-    ├── find user
-    │
-    ▼
-/profile(user)
-```
-
----
-### Logout
-
-- **Server:** invalidate the session in PostgreSQL.
-- **Browser:** remove the cookie.
-
-```
-cookie → hash → find Session → delete it → commit
-```
-
-```python
-@app.post("/logout")
-def logout(
-    response: Response,
-    db: DbSession = Depends(get_db),
-    session_id: str | None = Cookie(default=None)):
-  
-    if not session_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session not found",
-        )
-    session_id_hash = hash_session_id(session_id)
-    session = db.query(Session).filter(
-        Session.session_id_hash == session_id_hash
-    ).first()
-    if not session:
-        response.delete_cookie("session_id")
-        return {"message": "Already logged out"}
-    db.delete(session)
-    db.commit()
-    response.delete_cookie("session_id")
-    return {"message": "Logout successful"}
-```
-
-This will clear the session and remove the cookie from browser so with the same session_id user cant access the API's
-
----
-### JWT Token
-
-**Session auth = server-side state.**  
-**JWT auth = client carries a signed token containing claims.**
-
-
-in JWT, the token itself will have the expiration date, so no need to query db for every request to find the expiration date.
-
-```c
-pip install PyJWT
-```
-
-```
-SECRET_KEY
-    │
-    ├── sign JWT
-    │
-    └── verify JWT
-```
-
-JWT signing secret needs to be defined in settings.py of the fastapi application.
-
-in settings.py
-```python
-import os
-from dotenv import load_dotenv
-  
-load_dotenv(".env")
-if not os.getenv("JWT_SECRET_KEY"):
-    raise ValueError("JWT_SECRET_KEY is not set")
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-```
-
-in .env
-```env
-JWT_SECRET_KEY="<YOUR_JWT_SECRET_KEY>"
-```
-
->[!NOTE]
->Access token       → short-lived → API access
-Refresh token      → longer-lived → obtain new access token
-
-JWT flow
-```
-POST /jwt-login
-      ↓
-find user
-      ↓
-verify Argon2 password
-      ↓
-check active
-      ↓
-create JWT
-      ↓
-return bearer token
-```
-
->Encoding
-
-```python
-# JWT Authentication
-import jwt
-import settings
-  
-def create_jwt_token(user: UserDatabase):
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": str(user.id),
-        "iat": now,
-        "exp": now + timedelta(minutes=20)
-    }
-    token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm="HS256")
-    # encode the token with JWT secret key and algo HS256  
-    return token
-```
-
-
->Decoding
-
-```python
-def decode_token(token: str):
-    try:
-        payload = jwt.decode(
-            token,
-            settings.JWT_SECRET_KEY,
-
-            algorithms=["HS256"],
-            options={"require": ["sub", "iat", "exp"]} # To check the necessary fields in token
-        )
-        return payload  
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token expired",
-        )
-    except jwt.MissingRequiredClaimError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Token missing required claim: {e}",
-        )
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
-```
-
-> Validate current user whose details are in the jwt token
-
-	- Similar to HTTPBasic, HTTPBearer used to validate the token
-
-> Get the current user token and validate it
-
-```python
-from fastapi.security import HTTPBearer
-security = HTTPBearer()
-def get_current_user_jwt(token = Depends(security), db: DbSession = Depends(get_db)):
-    token = token.credentials
-    payload = decode_token(token)
-    user_id = payload.get("sub")
-    if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
-    try:
-        user_id = int(user_id)
-    except (ValueError, TypeError):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
-    user = db.query(UserDatabase).filter(
-        UserDatabase.id == user_id
-    ).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User is not active",
-        )
-    return user
-  
-@app.get("/jwt-profile")
-def jwt_profile(current_user: UserDatabase = Depends(get_current_user_jwt)):
-    return {"username": current_user.username, "email": current_user.email, "id": current_user.id}
-```
-
-```
-username/password
-      ↓
-   JWT login
-      ↓
- short-lived JWT
-      ↓
-Authorization: Bearer JWT
-      ↓
-verify signature + exp
-      ↓
-extract sub
-      ↓
-find user
-      ↓
- /jwt-profile
-```
-
->[!NOTE]
->If payload changes detected in the generated token, token will be invalidated 
-
-
-```
-Original token
-    ↓
-valid signature
-    ↓
-✅ accepted
-
-Modify payload
-    ↓
-signature no longer matches
-    ↓
-❌ rejected
-```
-
----
-
-#### Refresh token
-
-Used to get new access token.
-
-If an user using the app for more than 15 mins and access token expiration is only 15 mins, refresh token will create new access token after every 15 mins until user logs out. 
-
-```
-                    Login
-                      ↓
-              ┌───────┴───────┐
-              ↓               ↓
-       Access Token      Refresh Token
-        15 minutes          longer
-              ↓               ↓
-       API requests      obtain new
-                         access token
-```
-
-**Access token**
-
-- Used to access protected APIs.
-- Short-lived.
-- Sent frequently.
-
-**Refresh token**
-
-- Used only to obtain a new access token.
-- Longer-lived.
-- Much more sensitive.
-
-> Need to store the refresh token in server side (in a table)
-
-Refresh token model
-```python
-class RefreshToken(Base):
-    __tablename__ = "refresh_tokens"
-    id = Column(Integer, primary_key=True)
-    refresh_token_hash = Column(String(64), nullable=False,unique=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    expires_at = Column(DateTime(timezone=True), nullable=False)
-    revoked = Column(Boolean, default=False,nullable=False)
-    user = relationship("UserDatabase", back_populates="refresh_tokens")
-```
-
-```
-POST /jwt-login
-       ↓
-  verify credentials
-       ↓
- ┌─────┴─────────┐
- ↓               ↓
-Access JWT    Refresh token
-15 min          7 days
- ↓               ↓
-API access    get new access token
-```
-
-In jwt-login return both refresh and access token.
-```python
-@app.post("/jwt-login")
-def jwt_login(login_data: UserLogin, db: DbSession = Depends(get_db)):
-    token = create_jwt_token(user)
-    refresh_token = create_refresh_token(user, db)
-    return {"access_token": token, "token_type": "bearer", "refresh_token": refresh_token}
-```
-
-```
-Refresh Token A
-      │
-      ▼
-POST /jwt-refresh
-      │
-      ├── validate A
-      ├── revoke A
-      ├── create Refresh Token B
-      └── create Access Token B
-             │
-             ▼
-      return B + Access Token
-```
-
-once a new refresh token created, old one will be revoked and cant be accessed.
-
-> Refresh token implementation
-
-- Validate refresh token
-- revoke current one
-- Create new refresh and access token
-
-```python
-class RefreshTokenRequest(BaseModel):
-    refresh_token: str
-  
-@app.post("/jwt-refresh")
-def jwt_refresh(request: RefreshTokenRequest, db: DbSession = Depends(get_db)):
-    raw_refresh_token = request.refresh_token
-    refresh_token_hash = hashlib.sha256(raw_refresh_token.encode()).hexdigest()
-    stored_token = db.query(RefreshToken).filter(
-        RefreshToken.refresh_token_hash == refresh_token_hash
-    ).first()
-    if not stored_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-        )
-    if stored_token.expires_at < datetime.now(timezone.utc):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token expired",
-        
-
-    if stored_token.revoked:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token revoked",
-        )
-    user = stored_token.user
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User is not active",
-        )
-  
-    # Revoke old refresh token (Refresh Token Rotation)
-    stored_token.revoked = True
-  
-    new_refresh_token = create_refresh_token(user, db)
-    new_access_token = create_jwt_token(user)
-    return {"access_token": new_access_token, "refresh_token": new_refresh_token}
-```
-
-> Family tree
-
-If refresh token C created by B and B created by A and A is reused by attacker which is revoked means all the tokens created via A might also compromised so revoke all the tokens. 
-
-Have a column called family_id which marks the tree of token creation C from B, B from A ...
-```python
-# in RefreshToken model
-family_id = Column(String(64), nullable=False, index=True)
-```
-
-in jwt_refresh endpoint
-```python
-if stored_token.revoked:
-    db.query(RefreshToken).filter(
-        RefreshToken.family_id == stored_token.family_id
-    ).update({"revoked": True})
-    db.commit()
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Revoked refresh token reused. All tokens in this family have been invalidated.",
-    )
-```
-
-
-### JWT — completed
-
-- Access-token creation with `sub`, `iat`, `exp` ✅
-- HS256 signing and verification ✅
-- Required-claim validation ✅
-- Expired/invalid token handling ✅
-- Bearer authentication with `HTTPBearer` ✅
-- Protected endpoints using JWT dependency ✅
-- Opaque refresh tokens ✅
-- Refresh tokens stored as hashes ✅
-- Refresh-token expiry/revocation ✅
-- Access + refresh token login flow ✅
-- Refresh endpoint ✅
-- Refresh-token rotation ✅
-- Refresh-token family tracking ✅
-- Reuse detection + family revocation ✅
----
-
-## OAuth -> An Authorization framework
-
-If user wants to sign in to my application using google.
-
-| OAuth term               | In our example                                |
-| ------------------------ | --------------------------------------------- |
-| **Resource Owner**       | The user                                      |
-| **Client**               | Your FastAPI application                      |
-| **Authorization Server** | Google                                        |
-| **Resource Server**      | Google's API that holds user data             |
-| **Authorization Code**   | Temporary code Google gives your app          |
-| **Access Token**         | Credential your app uses to call Google's API |
-| **Redirect URI**         | Your FastAPI callback endpoint                |
-
-**Browser:** carries the authorization code.
-**Backend:** exchanges the code for tokens.
-
-```
-User
- ↓
-FastAPI
- ↓
-Google authorization
- ↓
-Authorization Code
- ↓
-FastAPI backend
- ↓
-Token exchange
- ↓
-Access Token
- ↓
-Google API
-```
-
-- Create a project in google cloud
-- Create an app
-- Create an OAuth client (Web app)
-	- Authorized redirect url -> http://localhost:8000/oauth/google/callback
-	- client id -> <YOUR_GOOGLE_CLIENT_ID>
-	- client secret -> <YOUR_GOOGLE_CLIENT_SECRET>
-
-> Google needs to know **what information your application is asking the user to authorize**.
-
-Add scope
-- under data access, select openid, email and profile
-	- openid -> I want to use OpenID Connect to establish the user's identity.
-	- email -> Allows the application to obtain the user's email identity information.
-	- profile -> Allows basic profile information such as the user's name and profile-related claims.
-Then add a test user, once its added, google side configuration is completed.
-
-> login with google means the following.
-
-```
-OAuth 2.0
-   ↓
-Authorization framework
-
-OpenID Connect
-   ↓
-Identity layer built on OAuth 2.0
-   ↓
-"Who is this Google user?"
-```
-
-
-**OAuth 2.0 + OpenID Connect (OIDC)**
-- OAuth handles the authorization flow.
-- OIDC handles authentication/identity.
-
-> OAuth flow
-
-When the user clicks:
-**Login with Google** ->  FastAPI application will redirect the browser to Google's **authorization endpoint**.
-
-The following will be sent to google
-```
-https://accounts.google.com/o/oauth2/v2/auth
-    ?client_id=YOUR_CLIENT_ID
-    &redirect_uri=http://localhost:8000/oauth/google/callback
-    &response_type=code
-    &scope=openid email profile
-    &state=SOME_RANDOM_VALUE
-```
-
-- client_id -> which google application making the request
-- redirect_uri -> after authorization, send the user to specified url
-- response_type=code -> this says "Don't give me an access token directly in the browser. Give me an authorization code."
-- scope -> This tells Google what access/identity information we're requesting
-- state=random_value -> Your application should generate a **cryptographically random state value** before redirecting the user.
-	- For example:
-```
-state = random_value
-```
-Your application remembers that value.
-
-Google eventually redirects:
-```
-/oauth/google/callback?code=...&state=random_value
-```
-Your application checks:
-```
-state_from_google == state_we_generated
-```
-If they don't match:
-```
-❌ Reject the request
-```
-Why?
-Because `state` protects the OAuth authorization flow against **CSRF/login-request forgery attacks**.
-
->[!NOTE]
->`state` lets your application verify that the callback it receives belongs to an OAuth flow that your application actually initiated for that user's browser session.
-
->`state` binds the OAuth callback to the browser/session that initiated the authorization request.
-
-```
-User
- ↓
-FastAPI /oauth/google/login
- ↓
-Redirect to Google
- ↓
-User authenticates/authorizes
- ↓
-Google → callback with authorization code
- ↓
-FastAPI exchanges code for tokens
- ↓
-FastAPI gets user's identity
-```
-
-For:
-
-```
-GET /oauth/google/login
-```
-
-the job is actually quite small:
-
-1. Generate a secure random `state`.
-2. Construct Google's authorization URL.
-3. Include:
-    - `client_id`
-    - `redirect_uri`
-    - `response_type=code`
-    - `scope=openid email profile`
-    - `state`
-4. Redirect the browser to Google.
-
-```
-Browser
-   │
-   │ 1. GET /oauth/google/login
-   ↓
-FastAPI
-   │
-   │ 2. Generate random state
-   │
-   │ 3. Set state in browser
-   │
-   │ 4. Redirect to Google
-   ↓
-Google
-   │
-   │ 5. User authenticates + authorizes
-   ↓
-Browser
-   │
-   │ 6. GET /oauth/google/callback?code=...&state=...
-   ↓
-FastAPI
-   │
-   │ 7. Compare returned state
-   │    with state stored in browser
-   ↓
-   │
-   ├── Match → continue
-   └── Mismatch → reject
-```
-
-
-```
-FastAPI
-   ↓
-Generate state
-   ↓
-Set state cookie
-   ↓
-Build authorization URL
-   ↓
-Redirect to Google
-   ↓
-Google authorization page
-```
-
-
-```python
-import urllib, os
-from starlette.responses import RedirectResponse
-
-# Google OAuth
-@app.get("/oauth/google/login")
-def google_login():
-    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_REDIRECT_URI:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Google OAuth is not configured properly in .env",
-        )
-    state = secrets.token_urlsafe(32)
-    auth_params = urllib.parse.urlencode({
-        "client_id": settings.GOOGLE_CLIENT_ID,
-        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
-        "response_type": "code",
-        "scope": "email profile openid",
-        "state": state,
-    })
-    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{auth_params}"
-    response = RedirectResponse(auth_url)
-    response.set_cookie("gooe_state", state, httponly=True, secure=False, samesite="lax", max_age=60*10)
-    return response
-  
-from fastapi import Request, Cookie
-@app.get("/oauth/google/callback")
-def google_callback(code: str,state: str, google_state: str | None = Cookie(default=None), db: DbSession = Depends(get_db)
-                    ):
-    if state != google_state:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid state",
-        )
-    if not code:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No code provided",
-        )
-    return {"message": "Google OAuth is working"}
-```
-
-```
-/login
-  ↓
-generate state
-  ↓
-state cookie
-  ↓
-Google
-  ↓
-callback
-  ↓
-verify state ✅
-  ↓
-authorization code
-```
-
-
-> Exchange token for authorization code.
-
-To exchange token make request directly to google's endpoint
-
-```
-Browser → FastAPI callback
-              ↓
-        authorization code
-              ↓
-        FastAPI → Google token endpoint
-              ↓
-        access token (+ ID token)
-```
-
-```python
-def exchange_google_code_for_token(code: str) -> dict:
-    token_url = "https://oauth2.googleapis.com/token"
-    payload = urllib.parse.urlencode({
-        "code": code,
-        "client_id": settings.GOOGLE_CLIENT_ID,
-        "client_secret": settings.GOOGLE_CLIENT_SECRET,
-        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
-        "grant_type": "authorization_code",
-    }).encode("utf-8")
-  
-    req = urllib.request.Request(
-        token_url,
-        data=payload,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to exchange token with Google: {error_body}",
-        )
-```
-
-> Response from google
-```json
-{
-  "access_token": "<ACCESS_TOKEN>",
-  "expires_in": 3599,
-  "scope": "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email openid",
-  "token_type": "Bearer",
-  "id_token": "<ID_TOKEN>"
-}
-```
-
-| Field          | Purpose                                                                       |
-| -------------- | ----------------------------------------------------------------------------- |
-| `access_token` | Credential used to call Google's protected APIs                               |
-| `expires_in`   | How long the access token is valid                                            |
-| `scope`        | Permissions Google granted                                                    |
-| `token_type`   | Usually `Bearer`                                                              |
-| `id_token`     | **OIDC identity token** — contains claims about the authenticated Google user |
-id_token is like the jwt token which contains information of the request like user, mail etc..
-
-id_token will have the following
-
-```json
-{
-  "iss": "https://accounts.google.com",
-  "azp": "<YOUR_GOOGLE_CLIENT_ID>",
-  "aud": "<YOUR_GOOGLE_CLIENT_ID>",
-  "sub": "<GOOGLE_SUB>",
-  "email": "<USER_EMAIL>",
-  "email_verified": true,
-  "at_hash": "<AT_HASH>",
-  "name": "<NAME>",
-  "picture": "<PICTURE_URL>",
-  "given_name": "<GIVEN_NAME>",
-  "iat": 1789912530,
-  "exp": 1789916130
-}
-```
-
-```
-                 Browser
-                    │
-                    │ state + nonce
-                    ▼
-                  Google
-                    │
-              authorization
-                    │
-                    ▼
-              callback(code, state)
-                    │
-                    ├── verify state
-                    │
-                    └── later verify nonce
-```
-
-
-`state` and `nonce` serve **different purposes**:
-- **state** → protects the OAuth authorization flow / callback from CSRF and request mix-up.
-- **nonce** → binds the OIDC ID token to the authentication request that initiated this login.
-
-```
-pip install google-auth
-```
-
-```
-Google ID token
-        ↓
-verify signature + issuer + audience + expiry + nonce
-        ↓
-sub = "google's unique user identifier"
-        ↓
-find Google identity in our DB
-        ↓
-local user_id = 42
-        ↓
-create OUR session
-        ↓
-browser receives OUR session cookie
-```
-
->`sub` is the identifier for the Google subject.
-
-OAuth model
-```python
-class OauthAccount(Base):
-    __tablename__ = "oauth_accounts"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
-    provider = Column(String, nullable=False)
-    provider_user_id = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    user = relationship("UserDatabase", back_populates="oauth_accounts")
-    __table_args__ = (UniqueConstraint("provider", "provider_user_id", name="unique_provider_user_id"),)
-```
-
----
-
-```python
-@app.get("/oauth/google/callback")
-def google_callback(
-    code: str,
-    state: str,
-    response: Response,
-    google_state: str | None = Cookie(default=None),
-    google_nonce: str | None = Cookie(default=None),
-    db: DbSession = Depends(get_db),
-):
-    if state != google_state:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid state (received query state={state!r}, cookie state={google_state!r}). 
-            #Mae sure you are using the same host (localhost vs 127.0.0.1) as GOOGLE_REDIRECT_URI.",
-        )
-    if not code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No code provided",
-        )
-    if not google_nonce:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid nonce",
-        )
-    token_response = exchange_google_code_for_token(code)
-  
-    # 1. Verify ID token + nonce
-    try:
-        id_info = id_token.verify_oauth2_token(
-            token_response['id_token'],
-            requests.Request(),
-            settings.GOOGLE_CLIENT_ID,
-            clock_skew_in_seconds=10,
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid Google ID token: {e}",
-        )
-    if id_info.get('nonce') != google_nonce:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid nonce",
-        )
-    if id_info.get('iss') not in ["accounts.google.com", "https://accounts.google.com"]:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid issuer",
-        )
-  
-    # 2. Get Google `sub`
-    google_sub = id_info.get("sub")
-    email = id_info.get("email")
-    if not google_sub or not email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing 'sub' or 'email' in Google ID token",
-        )
-  
-    # 3. Find OAuth account
-    oauth_account = db.query(OauthAccount).filter(
-        OauthAccount.provider == "google",
-        OauthAccount.provider_user_id == google_sub,
-    ).first()
-  
-
-    if oauth_account:
-
-        # Found -> get local user
-
-        user = db.query(UserDatabase).filter(UserDatabase.id == oauth_account.user_id).first()
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User linked to Google account not found",
-            )
-    else:
-        # Not found -> Find local user by email
-        user = db.query(UserDatabase).filter(UserDatabase.email == email).first()
-        if user:
-            # Found -> link Google accout
-
-            oauth_account = OauthAccount(
-                user_id=user.id,
-                provider="google",
-                provider_user_id=google_sub,
-            )
-            db.add(oauth_account)
-            db.commit()
-        else:
-            # Not found -> create local user
-            base_username = email.split("@")[0] or f"user_{google_sub[:8]}"
-            username = base_username
-            suffix = 1
-            while db.query(UserDatabase).filter(UserDatabase.username == username).first():
-                username = f"{base_username}_{suffix}"
-                suffix += 1
-  
-            # If the database odel allows null password_hash, use None; otherwise generate a random unusable hash
-            pwd_hash = None if getattr(UserDatabase.password_hash, "nullable", False) else hash_password(secrets.token_urlsafe(32))
-  
-            user = UserDatabase(
-                username=username,
-                email=email,
-                password_hash=pwd_hash,
-                is_active=True,
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-  
-            # Link Google account
-            oauth_account = OauthAccount(
-                user_id=user.id,
-                provider="google",
-                provider_user_id=google_sub,
-            )
-            db.add(oauth_account)
-            db.commit()
-  
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User is not active",
-        )
-  
-    # 4. Create OUR application session
-    session_id = create_session(user.id, db)
-  
-    # 5. Return JSONResponse with session cookie set and temporary oauth cookies deleted
-    res = JSONResponse(content={"message": "Login successful"})
-    res.delete_cookie("google_state", path="/")
-    res.delete_cookie("google_nonce", path="/")
-    res.set_cookie(
-        key="session_id",
-        value=session_id,
-        httponly=True,
-        samesite="lax",
-        secure=False,
-        max_age=86400,
-        path="/",
-    )
-    # 6. Done
-    return res
-```
-
----
-
-## CI - Continuous Integration, CD - Continuous Deployment
-
-CI should eventually be able to catch things like:
-
-```
-Wrong password → 401
-Inactive user → rejected
-Expired JWT → rejected
-Invalid JWT → rejected
-Revoked refresh token → rejected
-Expired session → rejected
-Logout → session unusable
-OAuth state mismatch → rejected
-Duplicate username/email → 409
-```
-
-Automation tests
-
-```
-pip install pytest
-```
-
-pytest → FastAPI app → HTTP request → response assertion
-
-Create a file called test_health.py
-```python
-from fastapi.testclient import TestClient
-from app.main import app
-  
-def test_health_check():
-    client = TestClient(app)
-    response = client.get("/health")
-    assert response.status_code == 200
-    assert response.json() == {"status": "Healthy"}
-```
-
-
-```cmd
-(pyenv) D:\Learning\Python\networking\Authentication-methods-in-django\Auth-playground>python -m pytest
-========================================= test session starts ==========================================
-platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0
-rootdir: D:\Learning\Python\networking\Authentication-methods-in-django\Auth-playground
-plugins: anyio-4.8.0
-collected 1 item                                                                                        
-
-tests\test_health.py .                                                                            [100%] 
-
-========================================== 1 passed in 1.16s =========================================== 
-```
-
-> ```python -m pytest```  is the cmd used to run the pytest
-
- The **`assert`** keyword is a sanity check that tests if a condition evaluates to `True`.
-### How it works:
-- **If `True`**: Execution continues to the next line normally.
-- **If `False`**: Python immediately raises an **`AssertionError`** and halts that block.
-
-auth_methods_test -> DB for pytest, all testing entries will be inserted in this db.
-
-To use test-db, following flow will be used
-
-```
-pytest starts
-   ↓
-set DATABASE_URL → auth_methods_test
-   ↓
-import application
-   ↓
-database.py reads DATABASE_URL
-   ↓
-create_engine(test database)
-   ↓
-tests run
-```
-
-Created a new env for test
-
-```env
-JWT_SECRET_KEY=<YOUR_JWT_SECRET_KEY>
-GOOGLE_CLIENT_ID=<YOUR_GOOGLE_CLIENT_ID>
-GOOGLE_CLIENT_SECRET=<YOUR_GOOGLE_CLIENT_SECRET>
-GOOGLE_REDIRECT_URI=http://localhost:8000/oauth/google/callback
-DATABASE_URL=postgresql+psycopg://postgres:<PASSWORD>@localhost:5432/auth_methods_test
-```
-
-env.py -> to use db from settings.py, cause alembic connects to the db which mentioned in alembic.ini
-```python
-from settings import DATABASE_URL
-config = context.config
-if DATABASE_URL:
-    config.set_main_option("sqlalchemy.url", DATABASE_URL)
-
-```
-
-
-### Database Schema & Multi-Tenant Model Architecture
-
-The application is built as a **multi-tenant authentication provider** where external client applications register under the `applications` table and manage users, sessions, tokens, and OAuth accounts scoped to their `app_id`.
+The system is built as a **multi-tenant Identity Provider**. External client applications register in the `applications` table, and all users, sessions, refresh tokens, and OAuth accounts belong to an `app_id`.
 
 ```mermaid
 erDiagram
@@ -1723,93 +119,245 @@ erDiagram
     USER ||--o{ SESSION : "has"
     USER ||--o{ REFRESH_TOKEN : "has"
     USER ||--o{ OAUTH_ACCOUNT : "links"
-
-    APPLICATION {
-        int id PK
-        string app_name
-        string api_key_hash UK
-        datetime created_at
-    }
-    USER {
-        int id PK
-        int app_id FK
-        string username UK
-        string password_hash
-        string email UK
-        boolean is_active
-        datetime created_at
-    }
-    SESSION {
-        int id PK
-        string session_id_hash UK
-        int user_id FK
-        int app_id FK
-        datetime created_at
-        datetime expires_at
-    }
-    REFRESH_TOKEN {
-        int id PK
-        string refresh_token_hash UK
-        int user_id FK
-        int app_id FK
-        string family_id
-        boolean revoked
-        datetime created_at
-        datetime expires_at
-    }
-    OAUTH_ACCOUNT {
-        int id PK
-        int user_id FK
-        int app_id FK
-        string provider
-        string provider_user_id UK
-        datetime created_at
-        datetime updated_at
-    }
 ```
 
-#### Why Cascades & Relationships Matter
-- **`cascade="all, delete-orphan"`**: When an `Application` is deleted, all users, sessions, refresh tokens, and OAuth links belonging to that application are automatically purged by PostgreSQL.
-- **`ondelete="CASCADE"`**: Database-level foreign key constraint ensuring referential integrity if rows are deleted directly via SQL.
-- **`UniqueConstraint("provider", "provider_user_id")`**: Ensures an external Google account cannot be linked to more than one user within the same provider context.
+### Core Schema Highlights (`models.py`)
+
+```python
+class Application(Base):
+    __tablename__ = "applications"
+    id = Column(Integer, primary_key=True, index=True)
+    app_name = Column(String, nullable=False)
+    api_key_hash = Column(String(64), nullable=False, unique=True)
+    users = relationship("UserDatabase", back_populates="application", cascade="all, delete-orphan")
+    sessions = relationship("Session", back_populates="application", cascade="all, delete-orphan")
+    refresh_tokens = relationship("RefreshToken", back_populates="application", cascade="all, delete-orphan")
+    oauth_accounts = relationship("OauthAccount", back_populates="application", cascade="all, delete-orphan")
+
+class UserDatabase(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    app_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    username = Column(String, nullable=False, unique=True)
+    password_hash = Column(String, nullable=False)
+    email = Column(String, nullable=False, unique=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+class Session(Base):
+    __tablename__ = "sessions"
+    id = Column(Integer, primary_key=True)
+    session_id_hash = Column(String(64), nullable=False, unique=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    app_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+    id = Column(Integer, primary_key=True)
+    refresh_token_hash = Column(String(64), nullable=False, unique=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    app_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    family_id = Column(String(64), nullable=False, index=True)
+    revoked = Column(Boolean, default=False, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+class OauthAccount(Base):
+    __tablename__ = "oauth_accounts"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    app_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    provider = Column(String, nullable=False)
+    provider_user_id = Column(String, nullable=False)
+    __table_args__ = (UniqueConstraint("provider", "provider_user_id", name="unique_provider_user_id"),)
+```
+
+#### Important Database Parameters Explained
+- **`cascade="all, delete-orphan"`**: If an application is deleted, SQLAlchemy automatically deletes all associated users, sessions, refresh tokens, and OAuth accounts.
+- **`ondelete="CASCADE"`**: Database-level foreign key constraint enforcing cascading deletes directly within PostgreSQL if rows are modified via raw SQL.
+- **`UniqueConstraint("provider", "provider_user_id")`**: Prevents a single external Google account from being bound multiple times under the same provider.
 
 ---
 
-## Centralized Universal Logout
+## 4. Database Migrations with Alembic
 
-### The Problem with Logging Out in JWT + Session Architectures
+Alembic detects changes in SQLAlchemy models and applies version-controlled database schema migrations.
 
-In traditional session-based systems, logout is simple: delete the session row from the `sessions` table.
-However, **JWT access tokens are stateless**: once a signed JWT is issued with an expiration of 20 or 60 minutes, the server validates its cryptographic signature without querying the database on every request. Deleting cookies on the client does NOT revoke the access token if an attacker or client still holds the Bearer token!
+```
+SQLAlchemy Models (models.py) ──> Alembic autogenerate ──> Migration Script ──> PostgreSQL
+```
 
-### The Solution: 3-Pillar Invalidation
+### Essential Alembic Commands
+```bash
+# 1. Initialize Alembic (creates alembic/ folder and alembic.ini)
+alembic init alembic
+
+# 2. Generate a new migration script based on model changes
+alembic revision --autogenerate -m "create auth tables"
+
+# 3. Apply all pending migrations to the database
+alembic upgrade head
+
+# 4. Stamp the database to a specific version without running DDL
+alembic stamp head
+```
+
+---
+
+## 5. Password Hashing & Security
+
+Plaintext passwords must never be stored in a database. Passwords are hashed using one-way cryptographic algorithms with automatic salting (Argon2 / Bcrypt).
+
+```python
+# app/security.py
+from argon2 import PasswordHasher
+hasher = PasswordHasher()
+
+def hash_password(password: str) -> str:
+    """Produces a secure one-way hash with unique salt."""
+    return hasher.hash(password)
+
+def verify_password(password: str, hashed_password: str) -> bool:
+    """Verifies candidate password against stored hash."""
+    try:
+        return hasher.verify(hashed_password, password)
+    except Exception:
+        return False
+```
+
+---
+
+## 6. Core Authentication Methods
+
+The service exposes dedicated endpoints for each authentication mechanism, plus a master dispatcher.
+
+### Method 1: Basic Authentication
+**Endpoint**: `POST /basic`
+
+- **Concept**: User sends `username`, `password`, and `app_name`.
+- **Behavior**: If the user does not exist, they are registered (`status: "registered"`). If they exist, credentials are authenticated (`status: "verified"`).
+
+```python
+@app.post("/basic", response_model=AuthResponse)
+def basic_auth(payload: AuthRequest, response: Response, db: DbSession = Depends(get_db)):
+    return execute_authentication(payload, "basic", response, db)
+```
+
+---
+
+### Method 2: Stateful Session Authentication
+**Endpoint**: `POST /session`
+
+- **Concept**: Server creates a secure random token (`secrets.token_urlsafe(32)`), saves the SHA-256 hash in the `sessions` table, and sets an HTTP cookie in the browser response.
+- **Statefulness**: State resides in the database. When the user visits subsequent pages, the browser transmits the cookie, and the server validates it against `sessions.expires_at`.
+
+```python
+session_id = secrets.token_urlsafe(32)
+session_hash = hashlib.sha256(session_id.encode()).hexdigest()
+# Save session_hash into PostgreSQL...
+
+response.set_cookie(
+    key="session_id",
+    value=session_id,
+    httponly=True,
+    samesite="lax",
+    secure=False,      # Set True in production HTTPS
+    max_age=86400,     # Valid for 24 hours (in seconds)
+    path="/",
+)
+```
+
+#### Detailed Cookie Flags Explained
+- **`httponly=True`**: Prevents client-side JavaScript (`document.cookie`) from reading the cookie, neutralizing Cross-Site Scripting (XSS) token theft.
+- **`samesite="lax"`**: Restricts cookie transmission to first-party requests and safe top-level navigations (GET), neutralizing Cross-Site Request Forgery (CSRF).
+- **`secure=True`**: Instructs browsers to send the cookie ONLY over encrypted HTTPS connections (set `False` for local `http://localhost` testing).
+- **`max_age=86400`**: Defines cookie lifetime in seconds (86,400s = 24 hours).
+- **`path="/"`**: Scopes cookie availability to the entire host domain.
+
+---
+
+### Method 3: Stateless JWT & Refresh Tokens
+**Endpoint**: `POST /jwt`
+
+- **Concept**: Server cryptographically signs a JSON payload containing user identity. The client transmits the token via `Authorization: Bearer <access_token>`.
+- **Lifecycle**:
+  - **Access Token (Short-Lived, e.g. 60m)**: Authorizes API requests without querying the database for user authentication.
+  - **Refresh Token (Long-Lived, e.g. 7 days)**: Opaque token stored in PostgreSQL used to request fresh access tokens.
+
+#### Refresh Token Rotation (RTR) & Reuse Detection
+To prevent compromised refresh tokens from granting indefinite access:
+1. Every time a refresh token is exchanged via `POST /jwt/refresh`, the server **revokes the old token** and issues a brand-new refresh token under the same `family_id`.
+2. If an attacker attempts to replay an already-revoked refresh token, **reuse detection triggers**: the server immediately revokes all tokens belonging to that `family_id`, logging the attacker and legitimate user out.
+
+```python
+# Reuse Detection Trigger
+if stored_token.revoked:
+    db.query(RefreshToken).filter(
+        RefreshToken.family_id == stored_token.family_id
+    ).update({"revoked": True})
+    db.commit()
+    raise HTTPException(
+        status_code=401,
+        detail="Revoked refresh token reused. All tokens in this family have been invalidated."
+    )
+```
+
+---
+
+### Method 4: OAuth 2.0 & OpenID Connect (Google)
+**Endpoint**: `POST /oauth`
+
+Allows external applications and service instances to authenticate users using their verified Google identity.
+
+```python
+@app.post("/oauth", response_model=AuthResponse)
+def oauth_auth_endpoint(payload: AuthRequest, response: Response, db: DbSession = Depends(get_db)):
+    return execute_authentication(payload, "oauth", response, db)
+```
+
+#### Essential OAuth Parameters Explained
+- **`client_id`**: Public identifier assigned to your application in Google Cloud Console.
+- **`client_secret`**: Confidential secret known only to your backend server and Google, used during authorization code exchange.
+- **`redirect_uri`**: Authorized callback URL where Google returns users after authentication. Must match the Google Cloud Console exactly.
+- **`response_type="code"`**: Tells Google to return a one-time Authorization Code (Authorization Code Flow).
+- **`scope="openid email profile"`**: Permissions requested from the user:
+  - `openid`: Enables OpenID Connect, requesting an ID token.
+  - `email`: Grants access to user's verified email address.
+  - `profile`: Grants access to basic profile attributes (name, picture).
+- **`state`**: Cryptographically secure random token generated by the server. Passed to Google and returned in callback to prevent CSRF.
+- **`nonce`**: Cryptographically secure random value embedded in the Google ID Token payload to prevent replay attacks.
+- **`id_token`**: Cryptographically signed JWT issued by Google verifying user identity.
+- **`clock_skew_in_seconds=10`**: Tolerates up to 10 seconds of time drift between Google's servers and local server clock during verification.
+
+---
+
+## 7. Centralized Universal Logout
+
+### The Challenge of JWT Logout
+Traditional session logout simply deletes the database row. However, **JWT access tokens are stateless**: because their signature is cryptographically valid until expiration (`exp`), deleting client cookies does not invalidate an access token if someone still holds the token string!
+
+### The 3-Pillar Solution
 
 ```mermaid
 flowchart TD
-    Client["Client POST /logout {'username': '...'}"] --> Endpoint["Centralized Logout Endpoint"]
-    Endpoint --> S1["1. Delete all DB rows in `sessions` table"]
-    Endpoint --> S2["2. Delete all DB rows in `refresh_tokens` table"]
-    Endpoint --> S3["3. Increment in-memory `USER_TOKEN_VERSIONS[user.id]`"]
-    Endpoint --> S4["4. Set Set-Cookie headers to expire all client cookies"]
+    Client["Client POST /logout {'username': '...'}"] --> LogoutHandler["Centralized Logout Endpoint"]
+    LogoutHandler --> P1["1. Delete all DB rows in `sessions` table"]
+    LogoutHandler --> P2["2. Delete all DB rows in `refresh_tokens` table"]
+    LogoutHandler --> P3["3. Increment `USER_TOKEN_VERSIONS[user.id] += 1`"]
+    LogoutHandler --> P4["4. Set response headers to wipe all client cookies"]
 
-    S1 --> ProfileCheck{"Old Session tries GET /profile"}
-    ProfileCheck -->|Session ID not in DB| 401A["401 Invalid session"]
+    P1 --> CheckSession{"Old Session calls GET /verify"}
+    CheckSession -->|Session not found in DB| 401A["401 Invalid session"]
 
-    S2 --> RefreshCheck{"Old Refresh Token tries POST /jwt-refresh"}
-    RefreshCheck -->|Hash not in DB| 401B["401 Invalid refresh token"]
+    P2 --> CheckRefresh{"Old Refresh Token calls POST /jwt/refresh"}
+    CheckRefresh -->|Token not found in DB| 401B["401 Invalid refresh token"]
 
-    S3 --> JWTCheck{"Old Access Token tries GET /jwt-profile"}
-    JWTCheck -->|Token version mismatch| 401C["401 Token revoked"]
+    P3 --> CheckJWT{"Old Access Token calls GET /verify"}
+    CheckJWT -->|Token version mismatch| 401C["401 Token revoked"]
 ```
 
-#### Implementation Code
-
+#### Endpoint Code (`POST /logout`)
 ```python
-# In-memory dictionary tracking user token versions for immediate revocation
 USER_TOKEN_VERSIONS: dict[int, int] = {}
-
-class LogoutRequest(BaseModel):
-    username: str
 
 @app.post("/logout")
 def logout(payload: LogoutRequest, response: Response, db: DbSession = Depends(get_db)):
@@ -1817,265 +365,162 @@ def logout(payload: LogoutRequest, response: Response, db: DbSession = Depends(g
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # 1. Purge all DB sessions
+    # 1. Invalidate all DB sessions
     db.query(Session).filter(Session.user_id == user.id).delete()
 
-    # 2. Purge all DB refresh tokens
+    # 2. Invalidate all DB refresh tokens
     db.query(RefreshToken).filter(RefreshToken.user_id == user.id).delete()
 
-    # 3. Bump token_version (invalidates all existing access tokens immediately)
+    # 3. Bump user token version (kills all active access tokens immediately)
     USER_TOKEN_VERSIONS[user.id] = USER_TOKEN_VERSIONS.get(user.id, 1) + 1
 
     db.commit()
 
-    # 4. Wipe client-side cookies
+    # 4. Wipe client cookies
     response.delete_cookie("session_id", path="/")
     response.delete_cookie("access_token", path="/")
     response.delete_cookie("refresh_token", path="/")
 
-    return {"message": f"User {user.username} logged out successfully. All sessions and tokens have been invalidated."}
+    return {"status": "success", "message": f"User '{user.username}' logged out successfully."}
 ```
-
-#### How Access Tokens Verify Revocation
-
-Inside `get_current_user_jwt`:
-
-```python
-expected_version = USER_TOKEN_VERSIONS.get(user.id, 1)
-if payload.get("token_version") != expected_version:
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Token has been revoked. Please login again.",
-    )
-```
-
-- When issued, a token receives `"token_version": 1`.
-- When user logs out, `USER_TOKEN_VERSIONS[user.id]` becomes `2`.
-- Any subsequent request holding the old token fails immediately with `401 Unauthorized`.
-- When the user logs in again, they receive a fresh token with `"token_version": 2`, which works normally.
 
 ---
 
-## Automated Testing Suite (Pytest)
+## 8. Introspection Endpoint (`GET /verify`)
 
-### How Pytest Runs Tests Without the Application Running
+Deployed microservices need a single endpoint to verify whether an incoming request from a user is authenticated. `GET /verify` introspects **either a Bearer JWT or a Session Cookie**:
 
-A common misconception is that you need to start the web server (e.g. `uvicorn app.main:app --reload`) before running `pytest`. **You do NOT need the application running.**
+```python
+@app.get("/verify")
+def verify_token_or_session(
+    bearer: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    session_id: str | None = Cookie(default=None),
+    db: DbSession = Depends(get_db),
+):
+    # 1. Bearer JWT Introspection
+    if bearer and bearer.credentials:
+        payload = decode_jwt(bearer.credentials)
+        user_id = int(payload.get("sub"))
+        user = db.query(UserDatabase).filter(UserDatabase.id == user_id).first()
 
-#### 1. In-Memory ASGI Invocation vs. Network HTTP Calls
+        if not user or not user.is_active:
+            raise HTTPException(status_code=401, detail="User not found or inactive")
+
+        # Verify token version hasn't been revoked via logout
+        expected_version = USER_TOKEN_VERSIONS.get(user.id, 1)
+        if payload.get("token_version") != expected_version:
+            raise HTTPException(status_code=401, detail="Token has been revoked")
+
+        return {"valid": True, "auth_type": "jwt", "user_id": user.id, "username": user.username}
+
+    # 2. Session Cookie Introspection
+    if session_id:
+        session_hash = hashlib.sha256(session_id.encode()).hexdigest()
+        session_record = db.query(Session).filter(
+            Session.session_id_hash == session_hash,
+            Session.expires_at > datetime.now(timezone.utc),
+        ).first()
+
+        if session_record and session_record.user and session_record.user.is_active:
+            return {"valid": True, "auth_type": "session", "user_id": session_record.user.id, "username": session_record.user.username}
+
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+    raise HTTPException(status_code=401, detail="No authentication credentials provided")
+```
+
+---
+
+## 9. Master Unified Route (`POST /auth`)
+
+For deployed instances that want a single entry point, `POST /auth` accepts `username`, `password`, `auth_type`, and `app_name`:
+
+```python
+@app.post("/auth", response_model=AuthResponse)
+def unified_auth_endpoint(payload: AuthRequest, response: Response, db: DbSession = Depends(get_db)):
+    target_type = (payload.auth_type or "jwt").lower()
+    return execute_authentication(payload, target_type, response, db)
+```
+
+---
+
+## 10. Automated Testing with Pytest (In-Memory Execution)
+
+### How Pytest Runs Without Uvicorn Running
+A common point of confusion is whether Uvicorn (`uvicorn app.main:app`) must be running before executing `pytest`. **It does NOT.**
 
 ```mermaid
 flowchart LR
-    subgraph Traditional Browser / Postman
-        Browser["Browser / Postman"] -->|Real TCP Socket<br>http://localhost:8000| Uvicorn["Uvicorn Web Server<br>(Network Listener)"]
-        Uvicorn -->|ASGI Interface| App1["FastAPI Application"]
+    subgraph Browser / Postman
+        Client1["Browser / Postman"] -->|TCP Network Socket :8000| Server["Uvicorn Server"]
+        Server -->|ASGI Protocol| App1["FastAPI Application"]
     end
 
-    subgraph Pytest In-Memory Execution
-        Test["Pytest Test Function"] -->|Direct Python Call| TestClient["fastapi.testclient.TestClient<br>(based on httpx)"]
-        TestClient -->|Direct ASGI in-memory pass| App2["FastAPI Application<br>(app.main.app)"]
+    subgraph Pytest In-Memory
+        PytestRunner["Pytest Test Function"] -->|Direct Python Call| TestClient["fastapi.testclient.TestClient"]
+        TestClient -->|In-Memory Call| App2["FastAPI Application"]
     end
 ```
 
-#### 2. How `TestClient` Works Under the Hood
-FastAPI's `TestClient` inherits from Starlette and wraps `httpx`. When you do:
-```python
-from fastapi.testclient import TestClient
-from app.main import app
+#### Why TestClient is In-Memory
+1. `TestClient` (built on `httpx`) imports the ASGI `app` object directly into memory in the **same Python process**.
+2. Calling `client.get(...)` passes the ASGI request scope dictionary directly to `app(scope, receive, send)` as an internal Python function call.
+3. No network sockets are bound, no ports are opened, and execution runs at hundreds of requests per second with zero port conflict risk.
+4. **What DOES need to be running**: The database (PostgreSQL) must be running, because SQLAlchemy database queries are real.
 
-client = TestClient(app)
-response = client.get("/health")
-```
-1. `TestClient` imports the ASGI `app` callable directly into memory inside the **same Python process**.
-2. When `client.get(...)` is called, it constructs the ASGI request `scope`, `receive`, and `send` dictionaries internally and invokes `app(scope, receive, send)` as a direct function call.
-3. **No network sockets are opened**, no ports (like `8000`) are bound, and no HTTP packets travel over the loopback interface (`127.0.0.1`).
-4. This results in **ultra-fast execution** (hundreds of requests per second) and completely eliminates port-binding conflicts (`Address already in use`).
-
-#### 3. What DOES Need to Be Running?
-- **The Database (PostgreSQL)**: While the web server is in-memory, the database queries (`SQLAlchemy` $\rightarrow$ `psycopg`) are real! Your database (`auth_methods_test`) must be running and accepting connections.
-- **In CI/CD (GitHub Actions)**: This is why [.github/workflows/ci.yml](file:///d:/Learning/Python/networking/Auth-playground/.github/workflows/ci.yml) spins up a `postgres:15` service container, but runs `pytest -v` directly without starting Uvicorn!
-
----
-
-### Architecture of the Test Suite
-
-```
-tests/
-├── __init__.py            # Makes tests an importable Python package
-├── conftest.py            # Global Pytest fixtures (DB creation, TestClient)
-├── utils.py               # Helper generator for unique, isolated test identities
-├── test_health.py         # Basic smoke check (/health)
-├── test_basic_auth.py     # HTTP Basic auth & /basic-auth service tests
-├── test_session.py        # Cookie sessions, /login, /profile, /logout tests
-├── test_jwt.py            # JWT tokens, refresh rotation, reuse detection, /logout tests
-└── test_oauth.py          # Google OAuth URLs, token exchange, and callback tests
-```
-
-### Pytest Configuration (`pytest.ini`)
-
-```ini
-[pytest]
-pythonpath = .
-testpaths = tests
-```
-- **`pythonpath = .`**: Automatically adds the project root to `sys.path` so root modules (`database`, `models`, `settings`, `app`) can be imported without import errors.
-- **`testpaths = tests`**: Restricts test collection strictly to the `tests/` directory.
-
-### Key Fixtures & Test Isolation (`conftest.py` & `utils.py`)
-
-```python
-# tests/conftest.py
-import sys
-from pathlib import Path
-
-# Ensures project root is on sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-import pytest
-from fastapi.testclient import TestClient
-from database import engine, Base, SessionLocal
-from app.main import app
-
-@pytest.fixture(scope="session", autouse=True)
-def setup_database():
-    """Ensure database schema is created before tests run."""
-    Base.metadata.create_all(bind=engine)
-    yield
-
-@pytest.fixture
-def client():
-    """Provides a fresh in-memory FastAPI test client."""
-    with TestClient(app) as test_client:
-        yield test_client
-```
+### Test Isolation via `unique_string()`
+To ensure tests are idempotent and can be run repeatedly without database unique constraint collisions, dynamic test strings are generated:
 
 ```python
 # tests/utils.py
 import uuid
-
 def unique_string(prefix: str = "test") -> str:
-    """Generates unique IDs (e.g. 'basic_user_a1b2c3d4') so repeated test runs never collide in the DB."""
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 ```
 
-### The Core Automated Test Tasks
+### The Test Tasks
 
-| Test File | Test Function | Purpose / Scenarios Covered |
-| :--- | :--- | :--- |
-| **`test_health.py`** | `test_health_check` | Validates API liveness (`GET /health` returns `200` with `{"status": "Healthy"}`). |
-| **`test_basic_auth.py`** | `test_basic_auth_service_registration_and_login` | Tests registration via `POST /basic` (`status: "registered"`) and repeat login (`status: "verified"`). |
-| | `test_basic_auth_via_unified_auth_endpoint` | Tests master endpoint `POST /auth` with `auth_type="basic"`. |
-| | `test_basic_auth_service_invalid_password` | Verifies wrong password triggers `401 Unauthorized ("Invalid credentials")`. |
-| **`test_session.py`** | `test_session_auth_service` | Tests session creation via `POST /session`, cookie setting, and introspection on `GET /verify`. |
-| | `test_session_via_unified_auth_endpoint` | Tests master endpoint `POST /auth` with `auth_type="session"`. |
-| | `test_session_login_and_centralized_logout_flow` | Tests session lifecycle: create session $\rightarrow$ verify $\rightarrow$ `POST /logout` $\rightarrow$ assert `GET /verify` fails with `401`. |
-| | `test_session_invalid_password` | Rejects incorrect password with `401`. |
-| **`test_jwt.py`** | `test_jwt_auth_service_and_verification` | Tests `POST /jwt` issuing access and refresh tokens, and validates introspection on `GET /verify`. |
-| | `test_jwt_via_unified_auth_endpoint` | Tests master endpoint `POST /auth` with `auth_type="jwt"`. |
-| | `test_jwt_invalid_password` | Rejects incorrect password with `401`. |
-| | `test_jwt_refresh_token_rotation_and_reuse_detection` | Tests Refresh Token Rotation via `POST /jwt/refresh`. Re-using an already rotated token triggers reuse detection. |
-| | `test_jwt_centralized_logout_invalidates_tokens` | Tests centralized logout: revokes access tokens, deletes refresh tokens, and asserts old token fails on `GET /verify`. |
-| **`test_oauth.py`** | `test_oauth_service_direct_login` | Tests OAuth provisioning via `POST /oauth` with `email` and `app_name`, and verifies token on `GET /verify`. |
-| | `test_oauth_via_unified_auth_endpoint` | Tests master endpoint `POST /auth` with `auth_type="oauth"`. |
-| | `test_oauth_missing_email` | Validates that calling `/oauth` without email returns `400 Bad Request`. |
+| Test File | Key Test Tasks |
+| :--- | :--- |
+| **`test_health.py`** | Validates `GET /health` returns `200` with `{"status": "Healthy"}`. |
+| **`test_basic_auth.py`** | Tests registration and login via `POST /basic` and master `POST /auth`. Rejects invalid passwords with `401`. |
+| **`test_session.py`** | Tests session creation, `session_id` cookie setting, introspection on `GET /verify`, and asserts old session fails after `POST /logout`. |
+| **`test_jwt.py`** | Tests `POST /jwt`, token introspection on `GET /verify`, refresh token rotation, reuse detection family revocation, and instant token invalidation upon `POST /logout`. |
+| **`test_oauth.py`** | Tests direct OAuth provisioning via `POST /oauth` with `email` and `app_name`, and verifies token on `GET /verify`. |
 
 ---
 
-## Explanation of All Imported Modules and Parameters
+## 11. CI/CD Pipeline with GitHub Actions
 
-Below is a detailed guide to every external and internal module, class, and parameter used in this codebase:
-
-### 1. Standard Library Modules
-
-| Module / Function | Purpose in Auth Playground |
-| :--- | :--- |
-| **`datetime`, `timedelta`, `timezone`** | Handles UTC timestamp calculations for token issue dates (`iat`), token expiration (`exp`), and session lifetimes (`expires_at = now + timedelta(days=7)`). |
-| **`hashlib`** | Cryptographic hashing utility: SHA-256 (`hashlib.sha256(...)`) is used to hash session IDs, refresh tokens, and application API keys before saving to PostgreSQL. |
-| **`secrets`** | Cryptographically secure random number generator: `secrets.token_urlsafe(32)` is used to generate session IDs, refresh tokens, OAuth state CSRF tokens, and nonces. |
-| **`urllib.parse`** | URL encoding tool: `urllib.parse.urlencode(...)` builds query parameter strings for the Google OAuth 2.0 authorization URL. |
-| **`urllib.request`, `urllib.error`** | Performs HTTP POST requests to Google's Token Endpoint (`https://oauth2.googleapis.com/token`) to exchange the authorization code for tokens. |
-| **`json`** | Decodes JSON payloads returned by Google's token endpoint into Python dictionaries. |
-
-### 2. FastAPI & Web Framework Modules
-
-| Class / Parameter | Purpose / Usage |
-| :--- | :--- |
-| **`FastAPI`** | Core ASGI framework application instance orchestrating all routes, middleware, and dependency injection. |
-| **`Depends`** | Dependency injection provider: used to inject database sessions (`db: DbSession = Depends(get_db)`) and auth extractors (`Depends(get_current_user_jwt)`). |
-| **`HTTPException`** | Standard exception class for raising HTTP errors with specific status codes (`401`, `403`, `404`, `409`) and JSON error messages (`detail="..."`). |
-| **`status`** | HTTP status code constants (`status.HTTP_401_UNAUTHORIZED`, `status.HTTP_409_CONFLICT`, etc.) avoiding magic numbers. |
-| **`Response`** | The raw HTTP response object, used to set or delete cookies (`response.set_cookie()`, `response.delete_cookie()`). |
-| **`Cookie`** | FastAPI parameter extractor that automatically extracts named cookies from incoming HTTP requests (`session_id: str \| None = Cookie(default=None)`). |
-| **`CORSMiddleware`** | Middleware enabling Cross-Origin Resource Sharing for frontends running on `localhost:3000` or `localhost:5173`. |
-| **`HTTPBasic`, `HTTPBasicCredentials`** | Extracts and parses HTTP Basic Authentication headers (`Authorization: Basic ...`) into `.username` and `.password`. |
-| **`HTTPBearer`** | Extracts Bearer tokens from the `Authorization: Bearer <token>` header. |
-| **`RedirectResponse`** | HTTP 307 redirect response used to forward the user's browser to Google's OAuth consent screen. |
-| **`JSONResponse`** | Custom HTTP response returning JSON content while setting or deleting cookies on the response headers. |
-
-### 3. Pydantic & Data Validation
-
-| Class | Purpose / Usage |
-| :--- | :--- |
-| **`BaseModel`** | Base class for defining request and response schemas, automatic JSON parsing, serialization, and OpenAPI documentation. |
-| **`EmailStr`** | Validates email syntax using `pydantic[email]`, rejecting malformed email inputs with HTTP 422 before route execution. |
-
-### 4. Database & ORM (SQLAlchemy)
-
-| Component | Purpose / Usage |
-| :--- | :--- |
-| **`create_engine`** | Establishes the database connection pool using the `DATABASE_URL`. |
-| **`sessionmaker`** | Factory for creating scoped database sessions (`SessionLocal`). |
-| **`declarative_base`** | Base class from which all database models (`UserDatabase`, `Session`, etc.) inherit table metadata. |
-| **`DbSession` (`sqlalchemy.orm.Session`)** | The active database transaction session used to query, add, commit, or rollback changes. |
-| **`IntegrityError`** | Exception raised on unique constraint violations (e.g., duplicate username or duplicate email), triggering a safe transaction rollback (`db.rollback()`). |
-
-### 5. Authentication & OAuth Libraries
-
-| Component | Purpose / Usage |
-| :--- | :--- |
-| **`jwt` (`PyJWT`)** | Encodes (`jwt.encode`) and decodes (`jwt.decode`) JSON Web Tokens with HS256 signatures, checking required claims (`sub`, `iat`, `exp`). |
-| **`google.oauth2.id_token`** | Validates Google OpenID Connect ID tokens (`verify_oauth2_token`), checking signature against Google's public certificates, verifying client ID audience (`aud`), issuer (`iss`), and expiration. |
-| **`google.auth.transport.requests.Request`** | HTTP transport adapter utilized by Google's token verification library to fetch Google's public keys. |
-| **`passlib` / `hash_password`, `verify_password`** | One-way hashing algorithm (bcrypt / argon2 / PBKDF2) ensuring raw passwords are never saved in plaintext. |
-
----
-
-## Continuous Integration & Continuous Deployment (CI/CD)
-
-The repository includes a ready-to-deploy **GitHub Actions** CI/CD pipeline in [`.github/workflows/ci.yml`](file:///d:/Learning/Python/networking/Auth-playground/.github/workflows/ci.yml).
-
-### How the CI/CD Pipeline Operates
+Automated continuous integration pipeline configured in [`.github/workflows/ci.yml`](file:///d:/Learning/Python/networking/Auth-playground/.github/workflows/ci.yml).
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Dev as Developer
-    participant Git as GitHub Actions Runner
-    participant PG as PostgreSQL Service Container (Docker)
-    participant Py as Pytest Test Runner
+    participant Git as GitHub Actions
+    participant Docker as PostgreSQL Container
+    participant Py as Pytest Runner
 
-    Dev->>Git: git push / pull_request (main/master)
-    Git->>PG: Spin up postgres:15 container (auth_methods_test on port 5432)
-    PG-->>Git: Health check passed (pg_isready)
-    Git->>Git: Checkout repo & Set up Python 3.11 (with pip cache)
-    Git->>Git: pip install -r requirements.txt
-    Git->>Py: Run `pytest -v`
-    Py->>PG: Base.metadata.create_all(bind=engine)
-    Py->>Py: Execute 15 test tasks across all auth modules
-    Py-->>Git: All 15 tests PASSED (0 failures)
-    Git-->>Dev: Green Checkmark / Ready to deploy!
+    Dev->>Git: git push origin dev/main
+    Git->>Docker: Start postgres:15 container on port 5432
+    Docker-->>Git: Container healthy (pg_isready)
+    Git->>Git: Install dependencies from requirements.txt
+    Git->>Py: Execute `pytest -v`
+    Py->>Docker: Initialize tables & run tests
+    Py-->>Git: All tests pass
+    Git-->>Dev: Green Checkmark
 ```
 
-### GitHub Actions Workflow File Breakdown
-
+### Workflow Configuration (`.github/workflows/ci.yml`)
 ```yaml
 name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, dev ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, dev ]
 
 jobs:
   test:
@@ -2104,32 +549,67 @@ jobs:
       DATABASE_URL: postgresql+psycopg://postgres:root@localhost:5432/auth_methods_test
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run Pytest Suite
-        run: |
-          pytest -v
+      - run: pip install -r requirements.txt
+      - run: pytest -v
 ```
 
-### Steps to Push & Run in GitHub Actions
+---
 
-1. Commit and push your code to GitHub:
-   ```bash
-   git add .
-   git commit -m "Complete multi-tenant auth service with centralized logout, tests, and CI/CD"
-   git push origin main
-   ```
-2. Navigate to your repository's **Actions** tab on GitHub.
-3. The **CI/CD Pipeline** will trigger automatically, start the PostgreSQL container, install dependencies, and run all 15 tests.
+## 12. Comprehensive Parameter & Module Glossary
+
+### Cookie Parameters
+
+| Parameter | Type | Purpose |
+| :--- | :--- | :--- |
+| **`key`** | `str` | Name of the cookie (e.g. `"session_id"`). |
+| **`value`** | `str` | Stored cookie value (e.g. raw token generated by `secrets.token_urlsafe(32)`). |
+| **`httponly`** | `bool` | When `True`, JavaScript cannot access `document.cookie`, preventing XSS token theft. |
+| **`secure`** | `bool` | When `True`, browsers only transmit cookie over HTTPS. Set `False` for local `http://localhost` testing. |
+| **`samesite`** | `str` | CSRF protection. `"lax"` sends cookie on top-level safe GET navigations; `"strict"` sends only on first-party same-site requests. |
+| **`max_age`** | `int` | Lifetime of the cookie in seconds (e.g. `86400` = 24 hours). |
+| **`path`** | `str` | URL path scope for the cookie (e.g. `"/"` makes it accessible across the entire application). |
+
+### OAuth Parameters
+
+| Parameter | Source | Purpose |
+| :--- | :--- | :--- |
+| **`client_id`** | Google Cloud Console | Unique public identifier for your registered application. |
+| **`client_secret`** | Google Cloud Console | Secret key known only to your server and Google, used during code exchange. |
+| **`redirect_uri`** | Google Cloud Console | Whitelisted callback URL where Google returns users after login. |
+| **`response_type`** | OAuth 2.0 Spec | Set to `"code"` to request an Authorization Code. |
+| **`scope`** | Google API | Permissions requested: `"openid email profile"`. |
+| **`state`** | Your Server | Random CSRF token verified in callback to prevent cross-site request forgery. |
+| **`nonce`** | Your Server | Random value embedded in ID token to prevent replay attacks. |
+| **`code`** | Google | Temporary authorization code exchanged for access and ID tokens. |
+| **`id_token`** | Google | Cryptographically signed OpenID Connect JWT containing verified user profile data. |
+| **`clock_skew_in_seconds`**| Google Auth Library | Time tolerance (e.g. 10s) allowed for clock differences between local server and Google. |
+
+### JWT Claims
+
+| Claim | Full Name | Purpose |
+| :--- | :--- | :--- |
+| **`sub`** | Subject | Unique identifier of the user (e.g. user ID). |
+| **`iat`** | Issued At | UNIX timestamp when the token was generated. |
+| **`exp`** | Expiration Time | UNIX timestamp after which the token is invalid. |
+| **`token_version`**| Custom Claim | Integer matching user's current version; bumped on logout for immediate revocation. |
+
+### FastAPI & SQLAlchemy Import Glossary
+
+| Class / Parameter | Module | Purpose |
+| :--- | :--- | :--- |
+| **`FastAPI`** | `fastapi` | Core application ASGI class. |
+| **`Depends`** | `fastapi` | Dependency injection system (used for `get_db` and security dependencies). |
+| **`HTTPException`** | `fastapi` | Standard exception for raising HTTP error responses (`status_code`, `detail`). |
+| **`status`** | `fastapi` | Clean HTTP status code constants (`HTTP_401_UNAUTHORIZED`, etc.). |
+| **`Response`** | `fastapi` | Response object used to attach headers and cookies. |
+| **`Cookie`** | `fastapi` | Dependency parameter extracting named cookies from incoming HTTP requests. |
+| **`HTTPBearer`** | `fastapi.security` | Extracts Bearer tokens from the `Authorization: Bearer <token>` header. |
+| **`BaseModel`** | `pydantic` | Base class for request/response schemas with automated validation and serialization. |
+| **`EmailStr`** | `pydantic` | Type-validated email string ensuring valid email format. |
+| **`DbSession`** | `sqlalchemy.orm` | Active SQLAlchemy database session for executing ORM queries. |
+| **`IntegrityError`** | `sqlalchemy.exc` | Database exception raised on duplicate key or constraint violation. |
