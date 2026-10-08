@@ -8,7 +8,7 @@ def test_session_auth_service(client):
 
     # 1. Register & authenticate through session endpoint
     res = client.post(
-        "/session",
+        "/session-auth",
         json={
             "username": username,
             "password": password,
@@ -60,7 +60,7 @@ def test_session_login_and_centralized_logout_flow(client):
 
     # 1. Authenticate / create session
     res = client.post(
-        "/session",
+        "/session-auth",
         json={
             "username": username,
             "password": password,
@@ -96,7 +96,7 @@ def test_session_invalid_password(client):
 
     # Register
     client.post(
-        "/session",
+        "/session-auth",
         json={
             "username": username,
             "password": "correct_password",
@@ -106,7 +106,7 @@ def test_session_invalid_password(client):
 
     # Attempt with wrong password
     bad_res = client.post(
-        "/session",
+        "/session-auth",
         json={
             "username": username,
             "password": "wrong_password",

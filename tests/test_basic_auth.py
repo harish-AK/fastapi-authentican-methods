@@ -9,7 +9,7 @@ def test_basic_auth_service_registration_and_login(client):
 
     # 1. Register a new user via basic auth endpoint
     register_res = client.post(
-        "/basic",
+        "/basic-auth",
         json={
             "username": username,
             "password": password,
@@ -28,7 +28,7 @@ def test_basic_auth_service_registration_and_login(client):
 
     # 2. Existing user logs in / verifies with the same credentials
     login_res = client.post(
-        "/basic",
+        "/basic-auth",
         json={
             "username": username,
             "password": password,
@@ -67,7 +67,7 @@ def test_basic_auth_service_invalid_password(client):
 
     # Register
     client.post(
-        "/basic",
+        "/basic-auth",
         json={
             "username": username,
             "password": "correct_password",
@@ -77,7 +77,7 @@ def test_basic_auth_service_invalid_password(client):
 
     # Attempt login with wrong password
     bad_res = client.post(
-        "/basic",
+        "/basic-auth",
         json={
             "username": username,
             "password": "wrong_password",

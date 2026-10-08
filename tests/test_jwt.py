@@ -9,7 +9,7 @@ def test_jwt_auth_service_and_verification(client):
 
     # 1. Register & get tokens via /jwt endpoint
     res = client.post(
-        "/jwt",
+        "/jwt-auth",
         json={
             "username": username,
             "password": password,
@@ -65,7 +65,7 @@ def test_jwt_invalid_password(client):
 
     # Register
     client.post(
-        "/jwt",
+        "/jwt-auth",
         json={
             "username": username,
             "password": "correct_password",
@@ -75,7 +75,7 @@ def test_jwt_invalid_password(client):
 
     # Failed login with wrong password
     bad_res = client.post(
-        "/jwt",
+        "/jwt-auth",
         json={
             "username": username,
             "password": "wrong_password",
@@ -92,7 +92,7 @@ def test_jwt_refresh_token_rotation_and_reuse_detection(client):
 
     # Register & get initial tokens
     reg_res = client.post(
-        "/jwt",
+        "/jwt-auth",
         json={
             "username": username,
             "password": password,
@@ -101,9 +101,9 @@ def test_jwt_refresh_token_rotation_and_reuse_detection(client):
     )
     initial_refresh_token = reg_res.json()["refresh_token"]
 
-    # 1. Rotate refresh token via /jwt/refresh
+    # 1. Rotate refresh token via /jwt-auth/refresh
     refresh_res = client.post(
-        "/jwt/refresh",
+        "/jwt-auth/refresh",
         json={"refresh_token": initial_refresh_token},
     )
     assert refresh_res.status_code == 200
@@ -121,7 +121,7 @@ def test_jwt_refresh_token_rotation_and_reuse_detection(client):
 
     # 2. Reuse Detection: Re-using the initial (now revoked) refresh token must fail
     reuse_res = client.post(
-        "/jwt/refresh",
+        "/jwt-auth/refresh",
         json={"refresh_token": initial_refresh_token},
     )
     assert reuse_res.status_code == 401
@@ -135,7 +135,7 @@ def test_jwt_centralized_logout_invalidates_tokens(client):
 
     # 1. Register & get tokens
     reg_res = client.post(
-        "/jwt",
+        "/jwt-auth",
         json={
             "username": username,
             "password": password,
@@ -171,14 +171,14 @@ def test_jwt_centralized_logout_invalidates_tokens(client):
 
     # 4. Attempting to refresh with the old refresh token must also fail
     rf_res = client.post(
-        "/jwt/refresh",
+        "/jwt-auth/refresh",
         json={"refresh_token": refresh_token},
     )
     assert rf_res.status_code == 401
 
     # 5. Re-authenticating issues a fresh valid token that works
     re_login_res = client.post(
-        "/jwt",
+        "/jwt-auth",
         json={"username": username, "password": password, "app_name": app_name},
     )
     assert re_login_res.status_code == 200

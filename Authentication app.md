@@ -129,33 +129,35 @@ Loads environment variables from `.env` (or `.env.test`) using `python-dotenv`:
   
 
 ```python
-
-import os
-
+import os, sys
 from pathlib import Path
-
 from dotenv import load_dotenv
-
-  
 
 BASE_DIR = Path(__file__).resolve().parent
 
-load_dotenv(BASE_DIR / ".env.test", override=True)
+# Automatically detect test environment (CI, pytest execution, or APP_ENV=test)
+is_test = (
+    os.getenv("APP_ENV", "").lower() in ("test", "testing", "ci")
+    or "pytest" in sys.modules
+    or any("pytest" in arg for arg in sys.argv)
+    or "PYTEST_CURRENT_TEST" in os.environ
+)
 
-  
+ENVIRONMENT = "test" if is_test else os.getenv("APP_ENV", "production").lower()
+
+# Dynamically select env file: .env.test during test/CI, .env for production
+env_file = BASE_DIR / (".env.test" if is_test else ".env")
+if env_file.exists():
+    load_dotenv(env_file, override=is_test)
+else:
+    load_dotenv(BASE_DIR / ".env", override=False)
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
-
 ORIGINS = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8000"]
-
 ```
 
   
@@ -464,7 +466,7 @@ The service exposes dedicated endpoints for each authentication mechanism, plus 
 
 ### Method 1: Basic Authentication
 
-**Endpoint**: `POST /basic`
+**Endpoint**: `POST /basic-auth`
 
   
 
@@ -476,7 +478,7 @@ The service exposes dedicated endpoints for each authentication mechanism, plus 
 
 ```python
 
-@app.post("/basic", response_model=AuthResponse)
+@app.post("/basic-auth", response_model=AuthResponse)
 
 def basic_auth(payload: AuthRequest, response: Response, db: DbSession = Depends(get_db)):
 
@@ -492,7 +494,7 @@ def basic_auth(payload: AuthRequest, response: Response, db: DbSession = Depends
 
 ### Method 2: Stateful Session Authentication
 
-**Endpoint**: `POST /session`
+**Endpoint**: `POST /session-auth`
 
   
 
@@ -554,7 +556,7 @@ response.set_cookie(
 
 ### Method 3: Stateless JWT & Refresh Tokens
 
-**Endpoint**: `POST /jwt`
+**Endpoint**: `POST /jwt-auth`
 
   
 
@@ -572,7 +574,7 @@ response.set_cookie(
 
 To prevent compromised refresh tokens from granting indefinite access:
 
-1. Every time a refresh token is exchanged via `POST /jwt/refresh`, the server **revokes the old token** and issues a brand-new refresh token under the same `family_id`.
+1. Every time a refresh token is exchanged via `POST /jwt-auth/refresh`, the server **revokes the old token** and issues a brand-new refresh token under the same `family_id`.
 
 2. If an attacker attempts to replay an already-revoked refresh token, **reuse detection triggers**: the server immediately revokes all tokens belonging to that `family_id`, logging the attacker and legitimate user out.
 
@@ -698,7 +700,7 @@ flowchart TD
 
   
 
-    P2 --> CheckRefresh{"Old Refresh Token calls POST /jwt/refresh"}
+    P2 --> CheckRefresh{"Old Refresh Token calls POST /jwt-auth/refresh"}
 
     CheckRefresh -->|Token not found in DB| 401B["401 Invalid refresh token"]
 
@@ -968,11 +970,11 @@ def unique_string(prefix: str = "test") -> str:
 
 | **`test_health.py`** | Validates `GET /health` returns `200` with `{"status": "Healthy"}`. |
 
-| **`test_basic_auth.py`** | Tests registration and login via `POST /basic` and master `POST /auth`. Rejects invalid passwords with `401`. |
+| **`test_basic_auth.py`** | Tests registration and login via `POST /basic-auth` and master `POST /auth`. Rejects invalid passwords with `401`. |
 
-| **`test_session.py`** | Tests session creation, `session_id` cookie setting, introspection on `GET /verify`, and asserts old session fails after `POST /logout`. |
+| **`test_session.py`** | Tests session creation via `POST /session-auth`, `session_id` cookie setting, introspection on `GET /verify`, and asserts old session fails after `POST /logout`. |
 
-| **`test_jwt.py`** | Tests `POST /jwt`, token introspection on `GET /verify`, refresh token rotation, reuse detection family revocation, and instant token invalidation upon `POST /logout`. |
+| **`test_jwt.py`** | Tests `POST /jwt-auth`, token introspection on `GET /verify`, refresh token rotation via `POST /jwt-auth/refresh`, reuse detection family revocation, and instant token invalidation upon `POST /logout`. |
 
 | **`test_oauth.py`** | Tests direct OAuth provisioning via `POST /oauth` with `email` and `app_name`, and verifies token on `GET /verify`. |
 

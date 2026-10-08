@@ -1,18 +1,17 @@
 import hashlib
-import json
 import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from database import get_db
-from models import Application, OauthAccount, RefreshToken, Session, UserDatabase
+from models import Application, RefreshToken, Session, UserDatabase
 from .security import hash_password, verify_password
 import settings
 from settings import ORIGINS
@@ -389,7 +388,6 @@ def unified_auth_endpoint(
 
 
 # 3. Basic Auth Route
-@app.post("/basic", response_model=AuthResponse)
 @app.post("/basic-auth", response_model=AuthResponse)
 def basic_auth_endpoint(
     payload: AuthRequest,
@@ -400,7 +398,6 @@ def basic_auth_endpoint(
 
 
 # 4. Session Auth Route
-@app.post("/session", response_model=AuthResponse)
 @app.post("/session-auth", response_model=AuthResponse)
 def session_auth_endpoint(
     payload: AuthRequest,
@@ -411,7 +408,6 @@ def session_auth_endpoint(
 
 
 # 5. JWT Auth Route
-@app.post("/jwt", response_model=AuthResponse)
 @app.post("/jwt-auth", response_model=AuthResponse)
 def jwt_auth_endpoint(
     payload: AuthRequest,
@@ -423,8 +419,6 @@ def jwt_auth_endpoint(
 
 # 6. OAuth Route
 @app.post("/oauth", response_model=AuthResponse)
-@app.post("/login/google", response_model=AuthResponse)
-@app.post("/oauth-service/google/login", response_model=AuthResponse)
 def oauth_auth_endpoint(
     payload: AuthRequest,
     response: Response,
@@ -434,8 +428,6 @@ def oauth_auth_endpoint(
 
 
 # 7. JWT Refresh Route
-@app.post("/jwt/refresh", response_model=RefreshResponse)
-@app.post("/jwt-refresh", response_model=RefreshResponse)
 @app.post("/jwt-auth/refresh", response_model=RefreshResponse)
 def refresh_token_endpoint(
     payload: RefreshTokenRequest,
