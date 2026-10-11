@@ -1,5 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from settings import DATABASE_URL
+
 db_url = DATABASE_URL
 if db_url:
     if db_url.startswith("postgres://"):
