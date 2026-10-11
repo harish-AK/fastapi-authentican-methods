@@ -26,7 +26,6 @@ jobs:
           --health-retries 5
 
     env:
-      APP_ENV: test
       JWT_SECRET_KEY: ci_cd_test_jwt_secret_key_123456789
       DATABASE_URL: postgresql+psycopg://postgres:root@localhost:5432/auth_methods_test
       GOOGLE_CLIENT_ID: mock_google_client_id
@@ -53,3 +52,6 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+
+      - name: Build Docker Image
+        run: docker build -t auth-service .
