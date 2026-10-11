@@ -1,11 +1,73 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, func
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, func, ForeignKey, UniqueConstraint
 from database import Base
+from sqlalchemy.orm import relationship
+
+# 1. NEW TABLE: Represents the developer's web app using your service
+class Application(Base):
+    __tablename__ = "applications"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    app_name = Column(String, nullable=False)
+    api_key_hash = Column(String(64), nullable=False, unique=True) # To verify the app's request
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationship to users belonging to this specific app
+    users = relationship("UserDatabase", back_populates="application", cascade="all, delete-orphan")
+    sessions = relationship("Session", back_populates="application", cascade="all, delete-orphan")
+    refresh_tokens = relationship("RefreshToken", back_populates="application", cascade="all, delete-orphan")
+    oauth_accounts = relationship("OauthAccount", back_populates="application", cascade="all, delete-orphan")
+
 
 class UserDatabase(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
+    app_id=Column(Integer,ForeignKey("applications.id", ondelete="CASCADE"),nullable=False)
     username = Column(String, nullable=False,unique=True)
     password_hash = Column(String, nullable=False)
     email = Column(String, nullable=False,unique=True)
     is_active = Column(Boolean, default=True,nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    sessions = relationship("Session", back_populates="user")
+    refresh_tokens = relationship("RefreshToken", back_populates="user")
+    oauth_accounts = relationship("OauthAccount", back_populates="user")
+    application = relationship("Application", back_populates="users")
+    __table_args__ = (UniqueConstraint("app_id", "username", name="unique_app_username"),
+    UniqueConstraint("app_id", "email", name="unique_app_email"))
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+    id = Column(Integer, primary_key=True)
+    session_id_hash = Column(String(64), nullable=False,unique=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
+    app_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    user = relationship("UserDatabase", back_populates="sessions")
+    application = relationship("Application", back_populates="sessions")
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+    id = Column(Integer, primary_key=True)
+    refresh_token_hash = Column(String(64), nullable=False,unique=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
+    app_id = Column(Integer, ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked = Column(Boolean, default=False,nullable=False)
+    user = relationship("UserDatabase", back_populates="refresh_tokens")
+    application = relationship("Application", back_populates="refresh_tokens")
+    family_id = Column(String(64), nullable=False, index=True)
+
+class OauthAccount(Base):
+    __tablename__ = "oauth_accounts"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),nullable=False)
+    provider = Column(String, nullable=False)
+    provider_user_id = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    user = relationship("UserDatabase", back_populates="oauth_accounts")
+    application=relationship("Application", back_populates="oauth_accounts")
+    app_id=Column(Integer,ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    __table_args__ = (UniqueConstraint("provider", "provider_user_id", name="unique_provider_user_id"),)

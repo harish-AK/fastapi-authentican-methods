@@ -1,0 +1,27 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+# Load .env (system/CI environment variables take precedence)
+load_dotenv(BASE_DIR / ".env", override=False)
+
+if not os.getenv("JWT_SECRET_KEY"):
+    raise ValueError("JWT_SECRET_KEY is not set")
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+OAUTH_SERVICE_REDIRECT_URI = os.getenv(
+    "OAUTH_SERVICE_REDIRECT_URI", "http://localhost:8000/oauth-service/google/callback"
+)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+ORIGINS = [
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://localhost:8000",
+]
