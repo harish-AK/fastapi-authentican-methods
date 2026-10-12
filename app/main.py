@@ -15,7 +15,7 @@ from models import Application, RefreshToken, Session, UserDatabase
 from .security import hash_password, verify_password
 import settings
 from settings import ORIGINS
-
+# test cmd
 # ==============================================================================
 # FASTAPI APPLICATION SETUP
 # ==============================================================================
