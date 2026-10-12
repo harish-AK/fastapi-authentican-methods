@@ -1,0 +1,4 @@
+[lint]
+ignore = [
+    "B008",  # Allow Depends() in FastAPI route function argument defaults
+]

@@ -48,7 +48,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Lint
-        run: ruff check --fix
+        run: ruff check --fix --extend-ignore=B008
 
       - name: Run tests
         run: pytest -v

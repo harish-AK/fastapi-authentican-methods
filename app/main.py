@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from database import get_db
-from models import Application, RefreshToken, Session, UserDatabase
+from models import Application, RefreshToken, Session, UserDatabase,OauthAccount
 from .security import hash_password, verify_password
 import settings
 from settings import ORIGINS
@@ -154,12 +154,11 @@ def get_or_create_user(
             )
 
     # User exists
-    if not is_oauth:
-        if not password or not verify_password(password, user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials",
-            )
+    if not is_oauth and (not password or not verify_password(password, user.password_hash)):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+        )
 
     if not user.is_active:
         raise HTTPException(
