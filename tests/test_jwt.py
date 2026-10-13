@@ -5,9 +5,9 @@ def test_jwt_auth_service_and_verification(client):
     username = unique_string("jwt_user")
     email = f"{username}@example.com"
     password = "jwt_password_123"
-    app_name = "JWTTestApp"
+    app_name = unique_string("jwt_app")
 
-    # 1. Register & get tokens via /jwt endpoint
+    # 1. Register & get tokens via /jwt endpoint (provisions api_key)
     res = client.post(
         "/jwt-auth",
         json={
@@ -24,6 +24,9 @@ def test_jwt_auth_service_and_verification(client):
     assert data["username"] == username
     assert "access_token" in data
     assert "refresh_token" in data
+    assert "api_key" in data
+    api_key = data["api_key"]
+    assert api_key is not None
 
     access_token = data["access_token"]
 
@@ -38,11 +41,36 @@ def test_jwt_auth_service_and_verification(client):
     assert verify_data["username"] == username
     assert verify_data["auth_type"] == "jwt"
 
+    # 3. Subsequent authentication with valid API key via header
+    subsequent_res = client.post(
+        "/jwt-auth",
+        json={
+            "username": username,
+            "password": password,
+            "app_name": app_name,
+        },
+        headers={"X-API-Key": api_key},
+    )
+    assert subsequent_res.status_code == 200
+
+    # 4. Subsequent authentication with invalid API key rejected
+    bad_key_res = client.post(
+        "/jwt-auth",
+        json={
+            "username": username,
+            "password": password,
+            "app_name": app_name,
+            "api_key": "invalid_jwt_api_key",
+        },
+    )
+    assert bad_key_res.status_code == 401
+    assert "Invalid API key" in bad_key_res.json()["detail"]
+
 
 def test_jwt_via_unified_auth_endpoint(client):
     username = unique_string("unified_jwt")
     password = "jwt_secret_pw"
-    app_name = "UnifiedApp"
+    app_name = unique_string("unified_jwt_app")
 
     # Call master POST /auth with auth_type="jwt"
     res = client.post(
@@ -57,14 +85,15 @@ def test_jwt_via_unified_auth_endpoint(client):
     assert res.status_code == 200
     assert res.json()["auth_type"] == "jwt"
     assert "access_token" in res.json()
+    assert "api_key" in res.json()
 
 
 def test_jwt_invalid_password(client):
     username = unique_string("jwt_bad_user")
-    app_name = "JwtBadApp"
+    app_name = unique_string("jwt_bad_app")
 
     # Register
-    client.post(
+    reg_res = client.post(
         "/jwt-auth",
         json={
             "username": username,
@@ -72,23 +101,27 @@ def test_jwt_invalid_password(client):
             "app_name": app_name,
         },
     )
+    assert reg_res.status_code == 200
+    api_key = reg_res.json()["api_key"]
 
-    # Failed login with wrong password
+    # Failed login with wrong password (providing valid api_key)
     bad_res = client.post(
         "/jwt-auth",
         json={
             "username": username,
             "password": "wrong_password",
             "app_name": app_name,
+            "api_key": api_key,
         },
     )
     assert bad_res.status_code == 401
+    assert "Invalid credentials" in bad_res.json()["detail"]
 
 
 def test_jwt_refresh_token_rotation_and_reuse_detection(client):
     username = unique_string("jwt_refresh_user")
     password = "refresh_password"
-    app_name = "JwtRefreshApp"
+    app_name = unique_string("jwt_refresh_app")
 
     # Register & get initial tokens
     reg_res = client.post(
@@ -131,7 +164,7 @@ def test_jwt_refresh_token_rotation_and_reuse_detection(client):
 def test_jwt_centralized_logout_invalidates_tokens(client):
     username = unique_string("jwt_logout_user")
     password = "logout_test_pw"
-    app_name = "JwtLogoutApp"
+    app_name = unique_string("jwt_logout_app")
 
     # 1. Register & get tokens
     reg_res = client.post(
@@ -145,6 +178,7 @@ def test_jwt_centralized_logout_invalidates_tokens(client):
     tokens = reg_res.json()
     access_token = tokens["access_token"]
     refresh_token = tokens["refresh_token"]
+    api_key = tokens["api_key"]
 
     # Verify access works before logout
     pre_res = client.get(
@@ -176,10 +210,15 @@ def test_jwt_centralized_logout_invalidates_tokens(client):
     )
     assert rf_res.status_code == 401
 
-    # 5. Re-authenticating issues a fresh valid token that works
+    # 5. Re-authenticating issues a fresh valid token that works (supplying api_key)
     re_login_res = client.post(
         "/jwt-auth",
-        json={"username": username, "password": password, "app_name": app_name},
+        json={
+            "username": username,
+            "password": password,
+            "app_name": app_name,
+            "api_key": api_key,
+        },
     )
     assert re_login_res.status_code == 200
     fresh_access_token = re_login_res.json()["access_token"]

@@ -2,7 +2,7 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, status
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
@@ -51,6 +51,7 @@ class AuthRequest(BaseModel):
     app_name: str = "DefaultApp"
     app_id: int | None = None
     auth_type: str | None = None  # "basic", "session", "jwt", "oauth"
+    api_key: str | None = None
 
 
 class AuthResponse(BaseModel):
@@ -66,6 +67,7 @@ class AuthResponse(BaseModel):
     access_token: str | None = None
     token_type: str | None = None
     refresh_token: str | None = None
+    api_key: str | None = None
 
 
 class RefreshTokenRequest(BaseModel):
@@ -89,32 +91,53 @@ class LogoutRequest(BaseModel):
 # CORE REUSABLE HELPERS
 # ==============================================================================
 
-def get_or_create_app(db: DbSession, app_name: str, app_id: int | None = None) -> Application:
-    """Finds or creates an Application record by app_name or app_id."""
+def get_or_create_app(
+    db: DbSession,
+    app_name: str,
+    app_id: int | None = None,
+    api_key: str | None = None,
+) -> tuple[Application, str]:
+    """Finds or creates an Application record, verifying the API key for existing applications."""
     query = db.query(Application)
+    app_record = None
     if app_id is not None:
         app_record = query.filter(Application.id == app_id).first()
-        if app_record:
-            return app_record
 
-    app_record = query.filter(Application.app_name == app_name).first()
-    if not app_record:
-        api_key_hash = hashlib.sha256(f"{app_name}_{secrets.token_hex(16)}".encode()).hexdigest()
-        app_record = Application(
-            id=app_id,
-            app_name=app_name,
-            api_key_hash=api_key_hash,
-        )
-        db.add(app_record)
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
+    if not app_record and app_name:
+        app_record = query.filter(Application.app_name == app_name).first()
+
+    if app_record:
+        if not api_key:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Could not initialize application '{app_name}'",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API key is required for application authentication",
             )
-    return app_record
+        provided_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        if provided_hash != app_record.api_key_hash:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key for application",
+            )
+        return app_record, api_key
+
+    # App does not exist, provision a new one
+    raw_api_key = api_key or f"ak_live_{secrets.token_urlsafe(24)}"
+    api_key_hash = hashlib.sha256(raw_api_key.encode()).hexdigest()
+    app_record = Application(
+        id=app_id,
+        app_name=app_name,
+        api_key_hash=api_key_hash,
+    )
+    db.add(app_record)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not initialize application '{app_name}'",
+        )
+    return app_record, raw_api_key
 
 
 def get_or_create_user(
@@ -245,8 +268,15 @@ def execute_authentication(
     target_auth_type: str,
     response: Response,
     db: DbSession,
+    header_api_key: str | None = None,
 ) -> AuthResponse:
-    app_record = get_or_create_app(db=db, app_name=payload.app_name, app_id=payload.app_id)
+    effective_api_key = payload.api_key or header_api_key
+    app_record, active_api_key = get_or_create_app(
+        db=db,
+        app_name=payload.app_name,
+        app_id=payload.app_id,
+        api_key=effective_api_key,
+    )
 
     # 1. BASIC AUTH
     if target_auth_type == "basic":
@@ -264,6 +294,7 @@ def execute_authentication(
             user_id=user.id,
             username=user.username,
             email=user.email,
+            api_key=active_api_key,
         )
 
     # 2. SESSION AUTH
@@ -292,6 +323,7 @@ def execute_authentication(
             username=user.username,
             email=user.email,
             session_id=session_id,
+            api_key=active_api_key,
         )
 
     # 3. JWT AUTH
@@ -315,6 +347,7 @@ def execute_authentication(
             access_token=access_token,
             token_type="bearer",
             refresh_token=refresh_token,
+            api_key=active_api_key,
         )
 
     # 4. OAUTH (GOOGLE / SOCIAL)
@@ -356,6 +389,7 @@ def execute_authentication(
             access_token=access_token,
             token_type="bearer",
             refresh_token=refresh_token,
+            api_key=active_api_key,
         )
 
     else:
@@ -380,10 +414,11 @@ def health_check():
 def unified_auth_endpoint(
     payload: AuthRequest,
     response: Response,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     db: DbSession = Depends(get_db),
 ):
     target_type = (payload.auth_type or "jwt").lower()
-    return execute_authentication(payload, target_type, response, db)
+    return execute_authentication(payload, target_type, response, db, header_api_key=x_api_key)
 
 
 # 3. Basic Auth Route
@@ -391,9 +426,10 @@ def unified_auth_endpoint(
 def basic_auth_endpoint(
     payload: AuthRequest,
     response: Response,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     db: DbSession = Depends(get_db),
 ):
-    return execute_authentication(payload, "basic", response, db)
+    return execute_authentication(payload, "basic", response, db, header_api_key=x_api_key)
 
 
 # 4. Session Auth Route
@@ -401,9 +437,10 @@ def basic_auth_endpoint(
 def session_auth_endpoint(
     payload: AuthRequest,
     response: Response,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     db: DbSession = Depends(get_db),
 ):
-    return execute_authentication(payload, "session", response, db)
+    return execute_authentication(payload, "session", response, db, header_api_key=x_api_key)
 
 
 # 5. JWT Auth Route
@@ -411,9 +448,10 @@ def session_auth_endpoint(
 def jwt_auth_endpoint(
     payload: AuthRequest,
     response: Response,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     db: DbSession = Depends(get_db),
 ):
-    return execute_authentication(payload, "jwt", response, db)
+    return execute_authentication(payload, "jwt", response, db, header_api_key=x_api_key)
 
 
 # 6. OAuth Route
@@ -421,9 +459,10 @@ def jwt_auth_endpoint(
 def oauth_auth_endpoint(
     payload: AuthRequest,
     response: Response,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     db: DbSession = Depends(get_db),
 ):
-    return execute_authentication(payload, "oauth", response, db)
+    return execute_authentication(payload, "oauth", response, db, header_api_key=x_api_key)
 
 
 # 7. JWT Refresh Route
