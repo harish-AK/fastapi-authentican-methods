@@ -313,8 +313,8 @@ def execute_authentication(
             key="session_id",
             value=session_id,
             httponly=True,
-            samesite="lax",
-            secure=False,
+            samesite="none",
+            secure=True,
             max_age=86400,
         )
         return AuthResponse(

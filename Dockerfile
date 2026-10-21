@@ -23,5 +23,5 @@ COPY . .
 # Expose application port
 EXPOSE 8000
 
-# Start Uvicorn bound to 0.0.0.0 and the dynamic cloud $PORT (defaults to 8000)
-CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run database migrations and then start Uvicorn bound to 0.0.0.0 and dynamic $PORT
+CMD ["sh", "-c", "alembic upgrade head && python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
