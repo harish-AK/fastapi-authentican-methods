@@ -1,8 +1,12 @@
+from contextlib import asynccontextmanager
 import hashlib
+from pathlib import Path
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
+from alembic.config import Config
+from alembic import command
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -13,12 +17,28 @@ import requests
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
-from database import get_db
-from models import Application, RefreshToken, Session, UserDatabase,OauthAccount
+from database import get_db, engine, Base
+from models import Application, RefreshToken, Session, UserDatabase, OauthAccount
 from .security import hash_password, verify_password
 import settings
 from settings import ORIGINS
-# test cmd
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+ALEMBIC_INI_PATH = str(BASE_DIR / "alembic.ini")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        alembic_cfg = Config(ALEMBIC_INI_PATH)
+        command.upgrade(alembic_cfg, "head")
+        print("Database migrations applied successfully to head.")
+    except Exception as e:
+        print(f"Alembic auto-migration notice: {e}")
+        Base.metadata.create_all(bind=engine)
+    yield
+
+
 # ==============================================================================
 # FASTAPI APPLICATION SETUP
 # ==============================================================================
@@ -27,6 +47,7 @@ app = FastAPI(
     title="Centralized Authentication Service",
     description="Microservice providing Basic, Session, JWT, and OAuth authentication.",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
