@@ -4,7 +4,6 @@ from pathlib import Path
 # Add project root directory to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import uuid
 import pytest
 from fastapi.testclient import TestClient
 from database import engine, Base, SessionLocal
@@ -36,8 +35,3 @@ def db():
         yield session
     finally:
         session.close()
-
-
-def unique_string(prefix: str = "test") -> str:
-    """Generates a random unique string to ensure tests are isolated and idempotent."""
-    return f"{prefix}_{uuid.uuid4().hex[:8]}"

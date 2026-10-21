@@ -2,17 +2,22 @@ from tests.utils import unique_string
 
 
 def test_session_auth_service(client):
+    app_name = unique_string("session_app")
     username = unique_string("session_svc")
     password = "session_secret_pw"
-    app_name = "SessionApp"
 
-    # 1. Register & authenticate through session endpoint
+    # 1. Register application once to receive api_key
+    app_res = client.post("/apps/register", json={"app_name": app_name})
+    assert app_res.status_code == 201
+    api_key = app_res.json()["api_key"]
+
+    # 2. Register & authenticate user through session endpoint using X-API-Key
     res = client.post(
         "/session-auth",
+        headers={"X-API-Key": api_key},
         json={
             "username": username,
             "password": password,
-            "app_name": app_name,
         },
     )
     assert res.status_code == 200
@@ -22,8 +27,9 @@ def test_session_auth_service(client):
     assert data["username"] == username
     assert "session_id" in data
     assert "session_id" in res.cookies
+    assert "api_key" not in data
 
-    # 2. Access /verify introspection endpoint using the session cookie
+    # 3. Access /verify introspection endpoint using the session cookie
     client.cookies.set("session_id", data["session_id"])
     verify_res = client.get("/verify")
     assert verify_res.status_code == 200
@@ -32,39 +38,48 @@ def test_session_auth_service(client):
     assert verify_data["username"] == username
     assert verify_data["auth_type"] == "session"
 
-
-def test_session_via_unified_auth_endpoint(client):
-    username = unique_string("unified_session")
-    password = "session_pwd"
-    app_name = "UnifiedApp"
-
-    # Call master POST /auth with auth_type="session"
-    res = client.post(
-        "/auth",
+    # 4. Subsequent session authentication with valid API key via header
+    subsequent_res = client.post(
+        "/session-auth",
+        headers={"X-API-Key": api_key},
         json={
             "username": username,
             "password": password,
-            "app_name": app_name,
-            "auth_type": "session",
         },
     )
-    assert res.status_code == 200
-    assert res.json()["auth_type"] == "session"
-    assert "session_id" in res.json()
+    assert subsequent_res.status_code == 200
+
+    # 5. Attempt session authentication with invalid API key
+    bad_key_res = client.post(
+        "/session-auth",
+        headers={"X-API-Key": "bad_api_key"},
+        json={
+            "username": username,
+            "password": password,
+        },
+    )
+    assert bad_key_res.status_code == 401
+    assert "Invalid API key" in bad_key_res.json()["detail"]
+
 
 
 def test_session_login_and_centralized_logout_flow(client):
+    app_name = unique_string("session_logout_app")
     username = unique_string("session_user")
     password = "user_secret_123"
-    app_name = "SessionLogoutApp"
+
+    # Register app
+    app_res = client.post("/apps/register", json={"app_name": app_name})
+    assert app_res.status_code == 201
+    api_key = app_res.json()["api_key"]
 
     # 1. Authenticate / create session
     res = client.post(
         "/session-auth",
+        headers={"X-API-Key": api_key},
         json={
             "username": username,
             "password": password,
-            "app_name": app_name,
         },
     )
     assert res.status_code == 200
@@ -91,26 +106,33 @@ def test_session_login_and_centralized_logout_flow(client):
 
 
 def test_session_invalid_password(client):
+    app_name = unique_string("session_bad_app")
     username = unique_string("session_bad_pw")
-    app_name = "SessionBadApp"
 
-    # Register
-    client.post(
+    # Register app
+    app_res = client.post("/apps/register", json={"app_name": app_name})
+    assert app_res.status_code == 201
+    api_key = app_res.json()["api_key"]
+
+    # Register user
+    reg_res = client.post(
         "/session-auth",
+        headers={"X-API-Key": api_key},
         json={
             "username": username,
             "password": "correct_password",
-            "app_name": app_name,
         },
     )
+    assert reg_res.status_code == 200
 
     # Attempt with wrong password
     bad_res = client.post(
         "/session-auth",
+        headers={"X-API-Key": api_key},
         json={
             "username": username,
             "password": "wrong_password",
-            "app_name": app_name,
         },
     )
     assert bad_res.status_code == 401
+    assert "Invalid credentials" in bad_res.json()["detail"]

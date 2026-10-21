@@ -1,12 +1,15 @@
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, status
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 from pydantic import BaseModel, EmailStr
+import requests
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
@@ -44,13 +47,21 @@ USER_TOKEN_VERSIONS: dict[int, int] = {}
 # SCHEMAS
 # ==============================================================================
 
+class AppRegisterRequest(BaseModel):
+    app_name: str
+
+
+class AppRegisterResponse(BaseModel):
+    app_id: int
+    app_name: str
+    api_key: str
+
+
 class AuthRequest(BaseModel):
     username: str | None = None
     password: str | None = None
     email: EmailStr | None = None
-    app_name: str = "DefaultApp"
-    app_id: int | None = None
-    auth_type: str | None = None  # "basic", "session", "jwt", "oauth"
+    api_key: str | None = None
 
 
 class AuthResponse(BaseModel):
@@ -89,31 +100,53 @@ class LogoutRequest(BaseModel):
 # CORE REUSABLE HELPERS
 # ==============================================================================
 
-def get_or_create_app(db: DbSession, app_name: str, app_id: int | None = None) -> Application:
-    """Finds or creates an Application record by app_name or app_id."""
-    query = db.query(Application)
-    if app_id is not None:
-        app_record = query.filter(Application.id == app_id).first()
-        if app_record:
-            return app_record
-
-    app_record = query.filter(Application.app_name == app_name).first()
-    if not app_record:
-        api_key_hash = hashlib.sha256(f"{app_name}_{secrets.token_hex(16)}".encode()).hexdigest()
-        app_record = Application(
-            id=app_id,
-            app_name=app_name,
-            api_key_hash=api_key_hash,
+def register_application(db: DbSession, app_name: str) -> tuple[Application, str]:
+    """Registers a new Application and returns the record and newly generated raw API key."""
+    clean_name = app_name.strip()
+    if not clean_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="app_name cannot be empty",
         )
-        db.add(app_record)
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Could not initialize application '{app_name}'",
-            )
+    existing = db.query(Application).filter(Application.app_name == clean_name).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Application '{clean_name}' already exists",
+        )
+    raw_api_key = f"ak_live_{secrets.token_urlsafe(24)}"
+    api_key_hash = hashlib.sha256(raw_api_key.encode()).hexdigest()
+    app_record = Application(
+        app_name=clean_name,
+        api_key_hash=api_key_hash,
+    )
+    db.add(app_record)
+    try:
+        db.commit()
+        db.refresh(app_record)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not register application '{clean_name}'",
+        )
+    return app_record, raw_api_key
+
+
+def get_app_by_api_key(db: DbSession, api_key: str | None) -> Application:
+    """Finds an Application record by hashing the provided API key."""
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key is required for application authentication",
+        )
+    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    app_record = db.query(Application).filter(Application.api_key_hash == api_key_hash).first()
+    if not app_record:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key for application",
+        )
     return app_record
 
 
@@ -245,8 +278,10 @@ def execute_authentication(
     target_auth_type: str,
     response: Response,
     db: DbSession,
+    header_api_key: str | None = None,
 ) -> AuthResponse:
-    app_record = get_or_create_app(db=db, app_name=payload.app_name, app_id=payload.app_id)
+    effective_api_key = payload.api_key or header_api_key
+    app_record = get_app_by_api_key(db=db, api_key=effective_api_key)
 
     # 1. BASIC AUTH
     if target_auth_type == "basic":
@@ -375,15 +410,18 @@ def health_check():
     return {"status": "Healthy"}
 
 
-# 2. Master Unified Auth Endpoint
-@app.post("/auth", response_model=AuthResponse)
-def unified_auth_endpoint(
-    payload: AuthRequest,
-    response: Response,
+# 2. Application Registration Endpoint
+@app.post("/apps/register", response_model=AppRegisterResponse, status_code=status.HTTP_201_CREATED)
+def register_app_endpoint(
+    payload: AppRegisterRequest,
     db: DbSession = Depends(get_db),
 ):
-    target_type = (payload.auth_type or "jwt").lower()
-    return execute_authentication(payload, target_type, response, db)
+    app_record, raw_api_key = register_application(db=db, app_name=payload.app_name)
+    return AppRegisterResponse(
+        app_id=app_record.id,
+        app_name=app_record.app_name,
+        api_key=raw_api_key,
+    )
 
 
 # 3. Basic Auth Route
@@ -391,9 +429,10 @@ def unified_auth_endpoint(
 def basic_auth_endpoint(
     payload: AuthRequest,
     response: Response,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     db: DbSession = Depends(get_db),
 ):
-    return execute_authentication(payload, "basic", response, db)
+    return execute_authentication(payload, "basic", response, db, header_api_key=x_api_key)
 
 
 # 4. Session Auth Route
@@ -401,9 +440,10 @@ def basic_auth_endpoint(
 def session_auth_endpoint(
     payload: AuthRequest,
     response: Response,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     db: DbSession = Depends(get_db),
 ):
-    return execute_authentication(payload, "session", response, db)
+    return execute_authentication(payload, "session", response, db, header_api_key=x_api_key)
 
 
 # 5. JWT Auth Route
@@ -411,19 +451,200 @@ def session_auth_endpoint(
 def jwt_auth_endpoint(
     payload: AuthRequest,
     response: Response,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     db: DbSession = Depends(get_db),
 ):
-    return execute_authentication(payload, "jwt", response, db)
+    return execute_authentication(payload, "jwt", response, db, header_api_key=x_api_key)
 
 
-# 6. OAuth Route
+# 6. Direct OAuth Route (For SDKs and automated calls)
 @app.post("/oauth", response_model=AuthResponse)
 def oauth_auth_endpoint(
     payload: AuthRequest,
     response: Response,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     db: DbSession = Depends(get_db),
 ):
-    return execute_authentication(payload, "oauth", response, db)
+    return execute_authentication(payload, "oauth", response, db, header_api_key=x_api_key)
+
+
+# 6a. OAuth Google Interactive Login Route (Redirects browser to Google)
+@app.get("/oauth/google/login")
+def google_oauth_login(
+    api_key: str = Query(..., description="Application API key"),
+    redirect_uri: str | None = Query(default=None, description="Client frontend URL to return to after login"),
+    db: DbSession = Depends(get_db),
+):
+    """
+    Initiates Google OAuth 2.0 flow:
+    1. Validates the client application's API key.
+    2. Encodes a secure signed JWT state containing the app reference and client redirect URI.
+    3. Redirects the user's browser to Google's consent screen.
+    """
+    app_record = get_app_by_api_key(db=db, api_key=api_key)
+
+    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_REDIRECT_URI:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google OAuth is not configured on this server",
+        )
+
+    state_payload = {
+        "api_key": api_key,
+        "app_id": app_record.id,
+        "redirect_uri": redirect_uri,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=15),
+    }
+    state_token = jwt.encode(state_payload, settings.JWT_SECRET_KEY, algorithm="HS256")
+
+    google_auth_params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "state": state_token,
+        "access_type": "offline",
+        "prompt": "select_account",
+    }
+    google_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(google_auth_params)}"
+    return RedirectResponse(url=google_url, status_code=status.HTTP_302_FOUND)
+
+
+# 6b. OAuth Google Callback Route (Exchanges code with Google and issues tokens)
+@app.get("/oauth/google/callback")
+def google_oauth_callback(
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    db: DbSession = Depends(get_db),
+):
+    """
+    Google OAuth 2.0 Callback:
+    1. Receives authorization code from Google redirect.
+    2. Decodes and verifies state to identify client application and frontend redirect URL.
+    3. Exchanges code for Google access token and retrieves verified email.
+    4. Provisions or retrieves user in database and generates access & refresh tokens.
+    5. Redirects back to client frontend with tokens, or returns JSON.
+    """
+    if error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Google OAuth error: {error}",
+        )
+
+    if not code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Authorization code was not provided by Google",
+        )
+
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing OAuth state parameter",
+        )
+
+    try:
+        state_data = jwt.decode(state, settings.JWT_SECRET_KEY, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OAuth state parameter",
+        )
+
+    api_key = state_data.get("api_key")
+    client_redirect_uri = state_data.get("redirect_uri")
+    app_record = get_app_by_api_key(db=db, api_key=api_key)
+
+    # Exchange code for Google tokens
+    token_url = "https://oauth2.googleapis.com/token"
+    token_payload = {
+        "code": code,
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "client_secret": settings.GOOGLE_CLIENT_SECRET,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+    token_res = requests.post(token_url, data=token_payload, timeout=10)
+    if token_res.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to exchange authorization code with Google",
+        )
+
+    google_tokens = token_res.json()
+    google_access_token = google_tokens.get("access_token")
+    if not google_access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google did not return an access token",
+        )
+
+    # Fetch user profile using Google's userinfo endpoint
+    userinfo_res = requests.get(
+        "https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {google_access_token}"},
+        timeout=10,
+    )
+    if userinfo_res.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to fetch user profile from Google",
+        )
+
+    user_info = userinfo_res.json()
+    email = user_info.get("email")
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google account has no associated email",
+        )
+
+    google_sub = user_info.get("sub") or hashlib.sha256(f"oauth_{email}".encode()).hexdigest()[:21]
+    username = user_info.get("name") or email.split("@")[0]
+
+    user, status_str, message_str = get_or_create_user(
+        db=db, app_record=app_record, username=username, email=email, is_oauth=True
+    )
+
+    # Ensure OAuth link exists
+    oauth_link = db.query(OauthAccount).filter(
+        OauthAccount.app_id == app_record.id,
+        OauthAccount.user_id == user.id,
+        OauthAccount.provider == "google",
+    ).first()
+    if not oauth_link:
+        oauth_link = OauthAccount(
+            user_id=user.id,
+            app_id=app_record.id,
+            provider="google",
+            provider_user_id=google_sub,
+        )
+        db.add(oauth_link)
+        db.commit()
+
+    access_token = create_user_jwt(user=user, app_id=app_record.id)
+    refresh_token = create_user_refresh_token(user=user, app_id=app_record.id, db=db)
+
+    # If client app passed a redirect_uri, redirect back with tokens in query params
+    if client_redirect_uri:
+        delimiter = "&" if "?" in client_redirect_uri else "?"
+        final_url = f"{client_redirect_uri}{delimiter}access_token={access_token}&refresh_token={refresh_token}&token_type=bearer"
+        return RedirectResponse(url=final_url, status_code=status.HTTP_302_FOUND)
+
+    return {
+        "status": status_str,
+        "message": message_str,
+        "auth_type": "oauth",
+        "app_name": app_record.app_name,
+        "app_id": app_record.id,
+        "user_id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "access_token": access_token,
+        "token_type": "bearer",
+        "refresh_token": refresh_token,
+    }
 
 
 # 7. JWT Refresh Route
