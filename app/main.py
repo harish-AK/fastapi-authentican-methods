@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 from alembic.config import Config
 from alembic import command
+from alembic.util.exc import CommandError
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -14,7 +15,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 from pydantic import BaseModel, EmailStr
 import requests
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session as DbSession
 
 from database import get_db, engine, Base
@@ -33,7 +34,7 @@ async def lifespan(app: FastAPI):
         alembic_cfg = Config(ALEMBIC_INI_PATH)
         command.upgrade(alembic_cfg, "head")
         print("Database migrations applied successfully to head.")
-    except Exception as e:
+    except (CommandError, SQLAlchemyError) as e:
         print(f"Alembic auto-migration notice: {e}")
         Base.metadata.create_all(bind=engine)
     yield
