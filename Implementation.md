@@ -275,7 +275,7 @@ After the user completes login with Google, the Auth Service redirects the brows
 https://your-client-app.com/oauth-callback?access_token=eyJhbGci...&refresh_token=rt_...&token_type=bearer
 ```
 
-**JavaScript Example (on your `/oauth-callback` page):**
+**JavaScript Example (on `/oauth-callback` page):**
 ```javascript
 // Extract tokens from URL search params
 const params = new URLSearchParams(window.location.search);
